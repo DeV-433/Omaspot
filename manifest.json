@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.devanshu.omaspot",
+  "name": "Omaspot",
+  "version": "1.0.0",
+  "author": "Devanshu",
+  "license": "MIT",
+  "description": "A compact Omarchy bar controller for a create_ap Wi-Fi hotspot.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omaspot",
+    "description": "Toggle and configure a local Wi-Fi hotspot",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

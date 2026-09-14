@@ -1,0 +1,7 @@
+# Local editor and test artifacts
+.qmlls.ini
+.cache/
+
+# Never commit per-machine hotspot state or logs if a checkout is used for testing.
+*.log
+settings/

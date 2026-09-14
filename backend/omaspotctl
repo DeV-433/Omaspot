@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# Omaspot's backend adapter. It drives create_ap (linux-wifi-hotspot), the
+# same engine the wihotspot GUI uses, and speaks a line protocol to QML so
+# every operation remains a non-blocking Quickshell Process.
+#
+# Lifecycle model: create_ap is started in the FOREGROUND under pkexec and
+# held open for the hotspot's lifetime, exactly like the wihotspot GUI.
+# Daemon mode is deliberately not used: pkexec's transient scope tears down
+# detached children when pkexec itself exits, so --daemon silently dies.
+# The root-side processes survive even if this holder is killed, and
+# `create_ap --stop` remains the single sanctioned stop path.
+set -u
+set -o pipefail
+
+# Keep this identical to Panel.qml's statePath. Quickshell and its child
+# Process can carry different XDG_STATE_HOME values, while Omarchy's plugin
+# state contract here is explicitly ~/.local/state/omarchy/settings.
+STATE_DIR="$HOME/.local/state/omarchy/settings"
+RUN_DIR="$STATE_DIR/omaspot"
+LOG_FILE="$RUN_DIR/create_ap.log"
+
+die() {
+  printf 'omaspot: %s\n' "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
+}
+
+as_root() {
+  # linux-wifi-hotspot ships a polkit action (org.opensuse.policykit.create-ap)
+  # that authorizes an active session, so this normally runs without prompts.
+  # The absolute path matches the action's exec.path annotation exactly.
+  pkexec --user root /usr/bin/create_ap "$@"
+}
+
+conf_of_running() {
+  # create_ap drops per-instance state in /tmp/create_ap.<viface>.conf.*; the
+  # wifi_iface file records the (possibly virtual) AP interface. Scanning it
+  # keeps the bar honest even for instances the wihotspot GUI started.
+  local conf pid
+  for conf in /tmp/create_ap.*.conf.*; do
+    [ -f "$conf/pid" ] && [ -f "$conf/wifi_iface" ] || continue
+    pid="$(cat "$conf/pid" 2>/dev/null || true)"
+    [ -n "$pid" ] && [ -d "/proc/$pid" ] || continue
+    printf '%s\n' "$conf"
+    return 0
+  done
+  return 1
+}
+
+wifi_iface_of_running() {
+  local conf
+  conf="$(conf_of_running)" || return 1
+  cat "$conf/wifi_iface" 2>/dev/null
+}
+
+pid_of_running() {
+  local conf
+  conf="$(conf_of_running)" || return 1
+  cat "$conf/pid" 2>/dev/null
+}
+
+interfaces() {
+  need nmcli
+  nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>/dev/null \
+    | while IFS=: read -r device type state connection; do
+        [ -n "$device" ] || continue
+        case "$type" in
+          wifi) printf '%s\twifi\t%s\n' "$device" "$state" ;;
+          ethernet) printf '%s\tethernet\t%s\n' "$device" "$state" ;;
+        esac
+      done
+}
+
+running_record() {
+  local iface pid log_tail
+  if iface="$(wifi_iface_of_running)"; then
+    pid="$(pid_of_running || true)"
+    printf 'active\t%s\t%s\t\n' "$iface" "$pid"
+    return 0
+  fi
+
+  if [ -r "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+    log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
+    [ -n "$log_tail" ] && printf 'omaspot: %s\n' "$log_tail" >&2
+    : > "$LOG_FILE" 2>/dev/null || true
+  fi
+  printf 'inactive\t\t\t\n'
+}
+
+status() {
+  running_record
+}
+
+start_create_ap() {
+  need nmcli
+  local wifi="$1"
+  local upstream="$2"
+  local band="$3"
+  local channel_mode="$4"
+  local channel="$5"
+  local ssid password
+
+  IFS= read -r ssid || true
+  IFS= read -r password || true
+  if [ "$wifi" = auto ] || [ -z "$wifi" ]; then
+    wifi="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
+      | awk -F: '$2 == "wifi" && $1 !~ /^p2p-/ && $3 != "unavailable" { print $1; exit }')"
+  fi
+  if [ "$upstream" = auto ] || [ -z "$upstream" ]; then
+    upstream="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
+      | awk -F: '$2 == "ethernet" && $3 == "connected" { print $1; exit }')"
+  fi
+  [ -n "$wifi" ] || die "No Wi-Fi interface was detected"
+  [ -n "$upstream" ] || die "No upstream interface was selected"
+  [ -n "$ssid" ] || die "Hotspot name is empty"
+  [ "${#ssid}" -le 32 ] || die "Hotspot name is longer than 32 characters"
+  [ "${#password}" -ge 8 ] || die "Security key must be at least 8 characters"
+  [ "${#password}" -le 63 ] || die "Security key is longer than 63 characters"
+  case "$band" in 2.4|5) ;; *) die "Unsupported Wi-Fi band" ;; esac
+
+  if pid="$(pid_of_running)"; then
+    die "A create_ap hotspot is already running (pid $pid)"
+  fi
+
+  mkdir -p "$RUN_DIR"
+  : > "$LOG_FILE"
+  chmod 0644 "$LOG_FILE"
+
+  # /etc/create_ap.conf carries the user's tuned defaults (gateway, sharing
+  # method, MAC filter, ...). Load it first, then override with the panel's
+  # live values so both GUI habits and panel edits are honored.
+  local args=()
+  if [ -r /etc/create_ap.conf ]; then
+    args+=(--config /etc/create_ap.conf)
+  fi
+  args+=(--freq-band "$band")
+  if [ "$channel_mode" = manual ]; then
+    args+=(-c "$channel")
+  fi
+  args+=("$wifi" "$upstream")
+
+  # create_ap reads SSID/passphrase from stdin when not attached to a tty, so
+  # credentials never appear in the pkexec command line or shell history.
+  # The process is held open (like the wihotspot GUI) until the hotspot stops;
+  # its output is captured live so failures can be shown from the log tail.
+  printf '%s\n%s\n' "$ssid" "$password" | as_root "${args[@]}" >"$LOG_FILE" 2>&1
+  local rc=$?
+
+  # create_ap exits 0 after a clean stop (SIGUSR1 from `create_ap --stop`),
+  # and non-zero when it fails; pkexec propagates the code. So the exit
+  # status alone separates a deliberate shutdown from a real failure.
+  if [ "$rc" -eq 0 ]; then
+    : > "$LOG_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  local log_tail
+  log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
+  if [ -n "$log_tail" ]; then
+    printf 'omaspot: %s\n' "$log_tail" >&2
+  elif [ "$rc" -eq 126 ]; then
+    printf 'omaspot: Polkit authorization was cancelled\n' >&2
+  else
+    printf 'omaspot: The hotspot exited unexpectedly (code %s)\n' "$rc" >&2
+  fi
+  return 1
+}
+
+stop_hotspot() {
+  local pid
+  if ! pid="$(pid_of_running)"; then
+    return 0
+  fi
+  # Signal the daemon the same way the GUI does. The daemon runs as root, so
+  # a plain kill is not permitted; --stop sends SIGUSR1 through create_ap.
+  as_root --stop "$pid" >/dev/null 2>&1 || true
+  # create_ap tears everything down (hostapd, dnsmasq, ap0, iptables) on exit;
+  # wait up to 10s for the instance to disappear.
+  local waited=0
+  while [ "$waited" -lt 40 ]; do
+    conf_of_running >/dev/null 2>&1 || break
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  : > "$LOG_FILE" 2>/dev/null || true
+}
+
+qr() {
+  need qrencode
+  local ssid password payload
+  IFS= read -r ssid || true
+  IFS= read -r password || true
+  [ -n "$ssid" ] || die "Hotspot name is empty"
+
+  # Escape the characters defined by the Wi-Fi QR payload format.
+  esc_ssid="$(printf '%s' "$ssid" | sed 's/\\/\\\\/g; s/;/\\;/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g')"
+  esc_password="$(printf '%s' "$password" | sed 's/\\/\\\\/g; s/;/\\;/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g')"
+  payload="WIFI:S:${esc_ssid};T:WPA;P:${esc_password};;"
+  printf '%s' "$payload" | qrencode -t ASCII -o -
+}
+
+deps() {
+  local item found=1
+  for item in create_ap nmcli qrencode pkexec; do
+    if command -v "$item" >/dev/null 2>&1; then
+      printf 'ok\t%s\n' "$item"
+    else
+      printf 'missing\t%s\n' "$item"
+      found=0
+    fi
+  done
+  [ "$found" -eq 1 ]
+}
+
+command_name="${1:-}"
+shift || true
+case "$command_name" in
+  interfaces) interfaces ;;
+  status) status ;;
+  deps) deps ;;
+  start) [ "$#" -eq 5 ] || die "start expects wifi, upstream, band, channel mode, channel"; start_create_ap "$@" ;;
+  stop) [ "$#" -eq 1 ] || die "stop expects a Wi-Fi interface"; stop_hotspot "$1" ;;
+  qr) qr ;;
+  *) die "Unknown command: $command_name" ;;
+esac
