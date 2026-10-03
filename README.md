@@ -10,6 +10,7 @@ Features:
 - One-click hotspot toggle from the Omarchy bar
 - Live status and useful error notifications
 - QR code that appears while the hotspot is active
+- List of recently connected clients, with the currently associated ones marked
 - Auto-detected Wi-Fi and upstream interfaces
 - 2.4 GHz and 5 GHz band selection
 - Automatic or manual channel selection
@@ -92,7 +93,8 @@ plugin installer.
 Click the Omaspot icon in the bar to open the panel. Choose the upstream
 interface, band, and channel policy if needed, update the hotspot name and
 security key, then use the switch. The QR code is generated only while the
-hotspot is active.
+hotspot is active. While it is active, the panel also lists the clients that
+have joined most recently; the list scrolls rather than growing the flyout.
 
 If another application already started `create_ap`, Omaspot detects it and
 can stop it through the same backend. It also loads `/etc/create_ap.conf` when
@@ -122,7 +124,26 @@ bash -n backend/omaspotctl
 ```
 
 The backend exposes the small protocol used by the QML panel:
-`status`, `interfaces`, `deps`, `start`, `stop`, and `qr`.
+`status`, `interfaces`, `deps`, `clients`, `start`, `stop`, and `qr`.
+
+`clients` is read-only and never escalates: it reports the tab-separated
+`mac`, `ip`, `hostname`, `state` of each client it finds, newest lease first.
+It reads the validated instance state directory plus the unprivileged `iw`
+station table rather than `create_ap --list-clients`, which needs root and
+would prompt on every refresh. Hostnames come from DHCP and are therefore
+attacker-controlled, so every field is validated against a strict pattern
+before it reaches the panel.
+
+## Instance state and trust
+
+`create_ap` records per-instance state under the world-writable `/tmp`, where
+any local user can create a `/tmp/create_ap.<iface>.conf.<id>` directory owned
+by themselves. Because `create_ap --stop` signals whatever pid it is given, a
+planted directory would otherwise turn the stop path into an arbitrary root
+signal. Omaspot therefore treats nothing under `/tmp` as trustworthy until it
+has been proven root-owned and unwritable by anyone else, refuses symlinks, and
+matches every pid against `/proc` — uid, `argv`, and start time — before it
+reaches a privileged command.
 
 ## License
 
