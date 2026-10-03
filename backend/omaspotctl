@@ -414,6 +414,108 @@ stop_hotspot() {
   : > "$LOG_FILE" 2>/dev/null || true
 }
 
+valid_mac() {
+  [ "${#1}" -eq 17 ] || return 1
+  [[ $1 =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]]
+}
+
+valid_ipv4() {
+  [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local octet
+  local -a octets=()
+  IFS='.' read -r -a octets <<<"$1"
+  for octet in "${octets[@]}"; do
+    [ "${#octet}" -le 3 ] || return 1
+    [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
+  done
+}
+
+# DHCP client names are chosen by whatever joins the hotspot, so they are
+# attacker-controlled text. Keep a short conservative subset and drop the rest
+# instead of forwarding it to the flyout.
+clean_hostname() {
+  local name="${1%%$'\t'}"
+  case "$name" in
+    '' | *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#name}" -le 64 ] || return 1
+  printf '%s' "$name"
+}
+
+# The most recently seen DHCP clients, as tab-separated mac, ip, hostname,
+# state. Deliberately avoids `create_ap --list-clients`: that subcommand
+# requires root (a polkit prompt on every refresh) and re-resolves its config
+# dir through the very /tmp scan this script no longer trusts. dnsmasq.leases
+# is created 0644 inside the already-validated conf dir, and iw reads the
+# station table unprivileged, so nothing here needs elevation.
+clients() {
+  local dir iface leases line expiry mac ip host state key
+  discover_instance || return 0
+  dir="$INST_CONF"
+  iface="$INST_IFACE"
+  leases="$dir/dnsmasq.leases"
+
+  declare -A seen_expiry=() seen_ip=() seen_host=() associated=()
+
+  if command -v iw >/dev/null 2>&1; then
+    while IFS= read -r mac; do
+      valid_mac "$mac" || continue
+      associated["${mac,,}"]=1
+    done < <(iw dev "$iface" station dump 2>/dev/null | awk '$1 ~ /^Station$/ { print $2 }')
+  fi
+
+  if [ -r "$leases" ]; then
+    # <expiry> <mac> <ip> <hostname> <client-id>; newest lease wins per mac.
+    while IFS= read -r line; do
+      read -r expiry mac ip host _ <<<"$line"
+      case "${expiry:-}" in
+        '' | *[!0-9]*) continue ;;
+      esac
+      valid_mac "${mac:-}" || continue
+      valid_ipv4 "${ip:-}" || continue
+      host="$(clean_hostname "${host:-}" || true)"
+      [ -n "$host" ] || host='*'
+      key="${mac,,}"
+      if [ -z "${seen_expiry[$key]:-}" ] || [ "$expiry" -gt "${seen_expiry[$key]}" ]; then
+        seen_expiry["$key"]="$expiry"
+        seen_ip["$key"]="$ip"
+        seen_host["$key"]="$host"
+      fi
+    done < <(head -n 500 "$leases" 2>/dev/null)
+  fi
+
+  # Associated stations with no lease row still belong in the list.
+  for key in "${!associated[@]}"; do
+    [ -n "${seen_expiry[$key]:-}" ] && continue
+    seen_expiry["$key"]=0
+    seen_ip["$key"]='*'
+    seen_host["$key"]='*'
+  done
+
+  [ "${#seen_expiry[@]}" -eq 0 ] && return 0
+
+  local -a rows=() top=()
+  for key in "${!seen_expiry[@]}"; do
+    if [ -n "${associated[$key]:-}" ]; then state=connected; else state=recent; fi
+    rows+=("${seen_expiry[$key]}"$'\t'"$key"$'\t'"${seen_ip[$key]}"$'\t'"${seen_host[$key]}"$'\t'"$state")
+  done
+
+  # Newest first, then at most three. awk rather than head so the sort never
+  # takes a SIGPIPE and leaks a shell error.
+  mapfile -t top < <(printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1nr | awk 'NR <= 3')
+
+  local line_out
+  for line_out in "${top[@]}"; do
+    IFS=$'\t' read -r _ mac ip host state <<<"$line_out"
+    valid_mac "$mac" || continue
+    case "$state" in
+      connected | recent) ;;
+      *) continue ;;
+    esac
+    printf '%s\t%s\t%s\t%s\n' "$mac" "$ip" "$host" "$state"
+  done
+}
+
 qr() {
   need qrencode
   local ssid password payload
@@ -449,6 +551,7 @@ case "$command_name" in
   deps) deps ;;
   start) [ "$#" -eq 5 ] || die "start expects wifi, upstream, band, channel mode, channel"; start_create_ap "$@" ;;
   stop) [ "$#" -eq 1 ] || die "stop expects a Wi-Fi interface"; stop_hotspot "$1" ;;
+  clients) [ "$#" -eq 0 ] || die "clients expects no arguments"; clients ;;
   qr) qr ;;
   *) die "Unknown command: $command_name" ;;
 esac

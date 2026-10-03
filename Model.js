@@ -85,6 +85,36 @@ function parseAsciiQr(raw) {
   return { rows: rows, size: rows.length }
 }
 
+function parseClients(raw) {
+  // Backend protocol: one device per line, tab separated, as
+  // mac, ip, hostname, state. Every field is re-validated here so a malformed
+  // or spoofed backend response still cannot put unexpected text in the flyout.
+  var lines = String(raw || "").replace(/\r/g, "").split("\n")
+  var result = []
+  var seen = {}
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].trim() === "") continue
+    var fields = lines[i].split("\t")
+    if (fields.length < 4) continue
+
+    var mac = String(fields[0] || "").trim()
+    var ip = String(fields[1] || "").trim()
+    var name = String(fields[2] || "").trim()
+    var state = String(fields[3] || "").trim()
+
+    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) continue
+    if (seen[mac]) continue
+    seen[mac] = true
+
+    if (ip !== "*" && !/^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) ip = "*"
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) name = mac
+
+    result.push({ mac: mac, ip: ip, name: name, connected: state === "connected" })
+    if (result.length >= 3) break
+  }
+  return result
+}
+
 function validChannel(value) {
   return /^(1|2|3|4|5|6|7|8|9|10|11|12|13|14|36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165)$/.test(String(value))
 }
@@ -106,6 +136,7 @@ if (typeof module !== "undefined") {
     parseState: parseState,
     parseStatus: parseStatus,
     parseInterfaces: parseInterfaces,
+    parseClients: parseClients,
     parseAsciiQr: parseAsciiQr,
     validChannel: validChannel,
     validate: validate

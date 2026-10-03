@@ -30,6 +30,7 @@ Panel {
   property int qrSize: 0
   property bool passwordVisible: false
   property bool startPending: false
+  property var connectedDevices: []
 
   readonly property string moduleId: "io.github.devanshu.omaspot"
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/settings"
@@ -112,9 +113,20 @@ Panel {
     if (!interfacesProc.running) interfacesProc.running = true
   }
 
+  // Reads DHCP leases and the iw station table from the already-validated
+  // instance state, so this never needs polkit and never blocks on a prompt.
+  function refreshClients() {
+    if (root.hotspotActive && !clientsProc.running) clientsProc.running = true
+  }
+
+  function applyClients(raw) {
+    connectedDevices = Model.parseClients(raw)
+  }
+
   function refreshAll() {
     refreshStatus()
     refreshInterfaces()
+    refreshClients()
     if (!dependencyProc.running) dependencyProc.running = true
   }
 
@@ -130,12 +142,16 @@ Panel {
       startSettleTimer.stop()
       saveState("active")
       scheduleQr()
+      refreshClients()
     }
     if (status === "inactive" && (previous === "stopping" || previous === "starting")) {
       if (previous === "starting" && errorMessage === "" && statusError === "")
         showError("The hotspot exited before becoming active")
       saveState("inactive")
     }
+    // Drop the device list whenever we are not active so the flyout never shows
+    // a stale roster for a hotspot that has stopped.
+    if (status !== "active" && connectedDevices.length > 0) connectedDevices = []
   }
 
   function applyInterfaces(raw) {
@@ -326,9 +342,23 @@ Panel {
     }
   }
 
+  Process {
+    id: clientsProc
+    command: [root.backendPath, "clients"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyClients(text) }
+  }
+
   Process { id: notifyProc }
 
   Timer { id: statusTimer; interval: 3000; repeat: true; running: true; onTriggered: root.refreshStatus() }
+  // Only polls while the hotspot is up; the backend exits immediately otherwise.
+  Timer {
+    id: clientsTimer
+    interval: 5000
+    repeat: true
+    running: root.hotspotActive
+    onTriggered: root.refreshClients()
+  }
   Timer {
     id: startSettleTimer
     // create_ap startup (virtual interface, channel scan, hostapd) takes a
@@ -429,6 +459,67 @@ Panel {
           color: Color.muted
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
+        }
+      }
+
+      // Recently connected devices, newest first. Backend-parsed values only.
+      Column {
+        id: devicesColumn
+        width: parent.width
+        spacing: Style.space(4)
+        visible: root.hotspotActive
+
+        Text {
+          text: "Connected devices"
+          color: Color.muted
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Repeater {
+          model: root.connectedDevices
+          Row {
+            required property var modelData
+            width: devicesColumn.width
+            spacing: Style.space(8)
+
+            Text {
+              width: Style.space(10)
+              text: modelData.connected ? "●" : "○"
+              color: modelData.connected ? root.statusColor : Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+            Text {
+              id: deviceName
+              width: Math.max(Style.space(40),
+                devicesColumn.width - Style.space(10) - parent.spacing
+                - deviceIp.width - Style.space(8))
+              text: modelData.name
+              color: modelData.connected ? root.foreground : Color.muted
+              elide: Text.ElideRight
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+            Text {
+              id: deviceIp
+              text: modelData.ip
+              visible: modelData.ip !== "*"
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.connectedDevices.length === 0
+          text: "Nothing has joined yet"
+          color: Color.muted
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
         }
       }
 
