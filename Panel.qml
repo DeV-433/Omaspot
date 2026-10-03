@@ -1,4 +1,10 @@
 import QtQuick
+// QtQuick.Controls is only needed for ScrollBar on the devices list. It is
+// imported before qs.Ui on purpose: QML resolves an unqualified type name to
+// the most recent matching import, so keeping qs.Ui last means Button,
+// TextField and ToggleSwitch still resolve to the Omarchy widgets rather than
+// the Controls ones.
+import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
