@@ -110,7 +110,6 @@ function parseClients(raw) {
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) name = mac
 
     result.push({ mac: mac, ip: ip, name: name, connected: state === "connected" })
-    if (result.length >= 3) break
   }
   return result
 }

@@ -462,67 +462,6 @@ Panel {
         }
       }
 
-      // Recently connected devices, newest first. Backend-parsed values only.
-      Column {
-        id: devicesColumn
-        width: parent.width
-        spacing: Style.space(4)
-        visible: root.hotspotActive
-
-        Text {
-          text: "Connected devices"
-          color: Color.muted
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
-          font.bold: true
-        }
-
-        Repeater {
-          model: root.connectedDevices
-          Row {
-            required property var modelData
-            width: devicesColumn.width
-            spacing: Style.space(8)
-
-            Text {
-              width: Style.space(10)
-              text: modelData.connected ? "●" : "○"
-              color: modelData.connected ? root.statusColor : Color.muted
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-            }
-            Text {
-              id: deviceName
-              width: Math.max(Style.space(40),
-                devicesColumn.width - Style.space(10) - parent.spacing
-                - deviceIp.width - Style.space(8))
-              text: modelData.name
-              color: modelData.connected ? root.foreground : Color.muted
-              elide: Text.ElideRight
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-            }
-            Text {
-              id: deviceIp
-              text: modelData.ip
-              visible: modelData.ip !== "*"
-              color: Color.muted
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-          }
-        }
-
-        Text {
-          width: parent.width
-          visible: root.connectedDevices.length === 0
-          text: "Nothing has joined yet"
-          color: Color.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-        }
-      }
-
       Rectangle {
         id: qrCard
         width: parent.width
@@ -613,6 +552,91 @@ Panel {
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.Wrap
+      }
+
+      // Recently connected devices, newest first. Backend-parsed values only.
+      // The list is capped and scrolls rather than growing the flyout, so a busy
+      // hotspot cannot push the settings below it off screen. ListView contributes
+      // no implicitHeight, which is what keeps the card the same size as before.
+      Column {
+        id: devicesColumn
+        width: parent.width
+        spacing: Style.space(4)
+        visible: root.hotspotActive
+
+        Text {
+          text: "Connected devices"
+          color: Color.muted
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Text {
+          width: parent.width
+          visible: root.connectedDevices.length === 0
+          text: "Nothing has joined yet"
+          color: Color.muted
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
+        ListView {
+          id: deviceList
+          visible: root.connectedDevices.length > 0
+          width: parent.width
+          height: Math.min(contentHeight, Style.space(120))
+          spacing: Style.space(4)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
+          // Keep the newest row in view as entries arrive while the list scrolls.
+          onCountChanged: if (count > 0 && contentHeight > height) positionViewAtPosition(0, ListView.Beginning)
+
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          model: root.connectedDevices
+
+          delegate: Item {
+            id: deviceRow
+            required property var modelData
+            width: ListView.view.width
+            height: deviceRowInner.implicitHeight
+
+            Row {
+              id: deviceRowInner
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                width: Style.space(10)
+                text: modelData.connected ? "●" : "○"
+                color: modelData.connected ? root.statusColor : Color.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                id: deviceName
+                width: Math.max(Style.space(40),
+                  deviceRowInner.width - Style.space(10) - deviceRowInner.spacing
+                  - deviceIp.width - Style.space(8))
+                text: modelData.name
+                color: modelData.connected ? root.foreground : Color.muted
+                elide: Text.ElideRight
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                id: deviceIp
+                text: modelData.ip
+                visible: modelData.ip !== "*"
+                color: Color.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+        }
       }
 
       Text {

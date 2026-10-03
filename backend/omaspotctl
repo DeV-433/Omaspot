@@ -442,12 +442,12 @@ clean_hostname() {
   printf '%s' "$name"
 }
 
-# The most recently seen DHCP clients, as tab-separated mac, ip, hostname,
-# state. Deliberately avoids `create_ap --list-clients`: that subcommand
-# requires root (a polkit prompt on every refresh) and re-resolves its config
-# dir through the very /tmp scan this script no longer trusts. dnsmasq.leases
-# is created 0644 inside the already-validated conf dir, and iw reads the
-# station table unprivileged, so nothing here needs elevation.
+# Every recently seen DHCP client, newest lease first, as tab-separated
+# mac, ip, hostname, state. Deliberately avoids `create_ap --list-clients`: that
+# subcommand requires root (a polkit prompt on every refresh) and re-resolves
+# its config dir through the very /tmp scan this script no longer trusts.
+# dnsmasq.leases is created 0644 inside the already-validated conf dir, and iw
+# reads the station table unprivileged, so nothing here needs elevation.
 clients() {
   local dir iface leases line expiry mac ip host state key
   discover_instance || return 0
@@ -466,6 +466,8 @@ clients() {
 
   if [ -r "$leases" ]; then
     # <expiry> <mac> <ip> <hostname> <client-id>; newest lease wins per mac.
+    # The line cap bounds the work on a pathological lease file; it is a
+    # read guard, not a display limit.
     while IFS= read -r line; do
       read -r expiry mac ip host _ <<<"$line"
       case "${expiry:-}" in
@@ -494,18 +496,18 @@ clients() {
 
   [ "${#seen_expiry[@]}" -eq 0 ] && return 0
 
-  local -a rows=() top=()
+  local -a rows=() ordered=()
   for key in "${!seen_expiry[@]}"; do
     if [ -n "${associated[$key]:-}" ]; then state=connected; else state=recent; fi
     rows+=("${seen_expiry[$key]}"$'\t'"$key"$'\t'"${seen_ip[$key]}"$'\t'"${seen_host[$key]}"$'\t'"$state")
   done
 
-  # Newest first, then at most three. awk rather than head so the sort never
-  # takes a SIGPIPE and leaks a shell error.
-  mapfile -t top < <(printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1nr | awk 'NR <= 3')
+  # Newest first, no display cap. awk rather than head so the sort never takes a
+  # SIGPIPE and leaks a shell error.
+  mapfile -t ordered < <(printf '%s\n' "${rows[@]}" | sort -t$'\t' -k1,1nr)
 
   local line_out
-  for line_out in "${top[@]}"; do
+  for line_out in "${ordered[@]}"; do
     IFS=$'\t' read -r _ mac ip host state <<<"$line_out"
     valid_mac "$mac" || continue
     case "$state" in
