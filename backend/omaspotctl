@@ -9,8 +9,18 @@
 # detached children when pkexec itself exits, so --daemon silently dies.
 # The root-side processes survive even if this holder is killed, and
 # `create_ap --stop` remains the single sanctioned stop path.
+#
+# Trust model: everything under /tmp is attacker-reachable, because /tmp is
+# world-writable and any local user can create /tmp/create_ap.<name>.conf.<id>
+# owned by themselves. create_ap --stop signals whatever pid it is handed, so a
+# spoofed state directory turns the stop path into an arbitrary root signal.
+# Nothing read out of /tmp is therefore believed until it has been proven to be
+# root-owned and unwritable by anyone else, and every pid is matched against
+# /proc before it reaches a privileged command.
 set -u
 set -o pipefail
+
+CREATE_AP_BIN=/usr/bin/create_ap
 
 # Keep this identical to Panel.qml's statePath. Quickshell and its child
 # Process can carry different XDG_STATE_HOME values, while Omarchy's plugin
@@ -18,6 +28,15 @@ set -o pipefail
 STATE_DIR="$HOME/.local/state/omarchy/settings"
 RUN_DIR="$STATE_DIR/omaspot"
 LOG_FILE="$RUN_DIR/create_ap.log"
+# Our own record of the instance we last validated. Private to this user, so it
+# is authoritative in a way the shared /tmp state can never be.
+STATE_FILE="$RUN_DIR/instance"
+
+# Populated by discover_instance once every check below has passed.
+INST_CONF=''
+INST_PID=''
+INST_IFACE=''
+INST_STARTTIME=''
 
 die() {
   printf 'omaspot: %s\n' "$*" >&2
@@ -32,34 +51,195 @@ as_root() {
   # linux-wifi-hotspot ships a polkit action (org.opensuse.policykit.create-ap)
   # that authorizes an active session, so this normally runs without prompts.
   # The absolute path matches the action's exec.path annotation exactly.
-  pkexec --user root /usr/bin/create_ap "$@"
+  pkexec --user root "$CREATE_AP_BIN" "$@"
 }
 
-conf_of_running() {
-  # create_ap drops per-instance state in /tmp/create_ap.<viface>.conf.*; the
-  # wifi_iface file records the (possibly virtual) AP interface. Scanning it
-  # keeps the bar honest even for instances the wihotspot GUI started.
-  local conf pid
-  for conf in /tmp/create_ap.*.conf.*; do
-    [ -f "$conf/pid" ] && [ -f "$conf/wifi_iface" ] || continue
-    pid="$(cat "$conf/pid" 2>/dev/null || true)"
-    [ -n "$pid" ] && [ -d "/proc/$pid" ] || continue
-    printf '%s\n' "$conf"
+# A pid arrives from a file, so accept only a plain decimal that no privilege
+# boundary has to interpret. No sign, no whitespace, no leading zero, no leading
+# dash that create_ap could mistake for one of its own options.
+valid_pid() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  # No leading zeros: bash reads those as octal, so 007 would address pid 7
+  # rather than the process whose decimal pid is 7.
+  case "$1" in
+    0[0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 10 ] || return 1
+  [ "$1" -ge 2 ] 2>/dev/null || return 1
+}
+
+# Interface names are interpolated into pkexec/create_ap arguments, so allow
+# only kernel-legal characters, within IFNAMSIZ, never starting with a dash.
+valid_iface() {
+  [ -n "$1" ] || return 1
+  [ "${#1}" -le 15 ] || return 1
+  case "$1" in
+    -*) return 1 ;;
+    *[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+}
+
+# First line only, trimmed. These files are attacker-reachable in general, so
+# never hand a whole file to a command.
+read_state_line() {
+  local line=''
+  [ -f "$1" ] || return 0
+  IFS= read -r line <"$1" 2>/dev/null || true
+  line="${line%$'\r'}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  printf '%s' "$line"
+}
+
+is_symlink() {
+  [ -L "$1" ]
+}
+
+# Group- or other-writable means any local user can rewrite the contents, which
+# is exactly what would make a spoofed instance indistinguishable from a real one.
+group_or_world_writable() {
+  local mode
+  mode="$(stat -c '%a' -- "$1" 2>/dev/null)" || return 1
+  [ "${#mode}" -gt 3 ] && mode="${mode: -3}"
+  [ -n "$mode" ] || return 1
+  [ $((8#$mode & 8#022)) -ne 0 ]
+}
+
+# Root-owned and unwritable by anyone else. create_ap chmods its conf dir to 755
+# on purpose so --list-running works for any user, so the requirement is "not
+# writable by others" rather than "0700".
+root_owned_unwritable() {
+  local path="$1" uid
+  [ -e "$path" ] || return 1
+  is_symlink "$path" && return 1
+  uid="$(stat -c '%u' -- "$path" 2>/dev/null)" || return 1
+  [ "$uid" = "0" ] || return 1
+  group_or_world_writable "$path" && return 1
+  return 0
+}
+
+# A regular, non-symlink, root-owned file no local user can rewrite.
+trusted_state_file() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  is_symlink "$path" && return 1
+  root_owned_unwritable "$path"
+}
+
+# The /tmp state directory itself must be genuine. Matching the create_ap naming
+# is not enough on its own -- a user can pick any suffix they like -- so also
+# require root ownership and no write bit for group or other.
+trusted_conf_dir() {
+  local dir="$1" name
+  [ -d "$dir" ] || return 1
+  is_symlink "$dir" && return 1
+  case "$dir" in
+    /tmp/create_ap.*.conf.*) ;;
+    *) return 1 ;;
+  esac
+  root_owned_unwritable "$dir" || return 1
+  for name in pid wifi_iface; do
+    trusted_state_file "$dir/$name" || return 1
+  done
+  return 0
+}
+
+# Field 22 of /proc/<pid>/stat is the process start time in clock ticks since
+# boot. It is the only cheap way to tell the pid we validated from a later
+# process that merely inherited the same number. comm is parenthesised and may
+# itself contain spaces, so split after the final ')'.
+proc_starttime() {
+  local pid="$1" stat_line rest
+  [ -r "/proc/$pid/stat" ] || return 1
+  IFS= read -r stat_line <"/proc/$pid/stat" 2>/dev/null || return 1
+  rest="${stat_line##*) }"
+  # shellcheck disable=SC2086
+  set -- $rest
+  [ "$#" -ge 20 ] || return 1
+  case "${20}" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "${20}"
+}
+
+# create_ap is a `#!/usr/bin/env bash` script, so /proc/<pid>/comm is "bash" for
+# every instance and cannot identify anything -- trusting comm would accept any
+# shell. The script path in argv is the stable token instead, and the process
+# must be running as root because pkexec started it.
+pid_is_create_ap() {
+  local pid="$1" arg found=0
+  valid_pid "$pid" || return 1
+  [ -d "/proc/$pid" ] || return 1
+  [ "$(stat -c '%u' -- "/proc/$pid" 2>/dev/null)" = "0" ] || return 1
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' arg; do
+    case "${arg##*/}" in
+      create_ap)
+        found=1
+        break
+        ;;
+    esac
+  done <"/proc/$pid/cmdline" 2>/dev/null
+  [ "$found" -eq 1 ]
+}
+
+secure_run_dir() {
+  mkdir -p "$RUN_DIR" 2>/dev/null || return 1
+  chmod 0700 "$RUN_DIR" 2>/dev/null || true
+}
+
+record_field() {
+  local key="$1" line name
+  [ -f "$STATE_FILE" ] || return 0
+  is_symlink "$STATE_FILE" && return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    name="${line%%=*}"
+    [ "$name" = "$key" ] || continue
+    printf '%s' "${line#*=}"
+    return 0
+  done <"$STATE_FILE"
+}
+
+record_instance() {
+  secure_run_dir || return 0
+  (
+    umask 077
+    printf 'pid=%s\nwifi_iface=%s\nstarttime=%s\nconfdir=%s\n' \
+      "$1" "$2" "$3" "$4" >"$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+  ) 2>/dev/null || true
+}
+
+clear_record() {
+  rm -f "$STATE_FILE" "$STATE_FILE.tmp" 2>/dev/null || true
+}
+
+# Fills INST_* with an instance that passed every check, or returns non-zero
+# when nothing trustworthy is running. Discovery order is irrelevant because a
+# spoofed directory cannot clear trusted_conf_dir.
+discover_instance() {
+  local dir pid iface starttime
+  INST_CONF=''
+  INST_PID=''
+  INST_IFACE=''
+  INST_STARTTIME=''
+
+  for dir in /tmp/create_ap.*.conf.*; do
+    trusted_conf_dir "$dir" || continue
+    pid="$(read_state_line "$dir/pid")"
+    valid_pid "$pid" || continue
+    pid_is_create_ap "$pid" || continue
+    starttime="$(proc_starttime "$pid")" || continue
+    iface="$(read_state_line "$dir/wifi_iface")"
+    valid_iface "$iface" || continue
+    INST_CONF="$dir"
+    INST_PID="$pid"
+    INST_IFACE="$iface"
+    INST_STARTTIME="$starttime"
     return 0
   done
   return 1
-}
-
-wifi_iface_of_running() {
-  local conf
-  conf="$(conf_of_running)" || return 1
-  cat "$conf/wifi_iface" 2>/dev/null
-}
-
-pid_of_running() {
-  local conf
-  conf="$(conf_of_running)" || return 1
-  cat "$conf/pid" 2>/dev/null
 }
 
 interfaces() {
@@ -75,10 +255,10 @@ interfaces() {
 }
 
 running_record() {
-  local iface pid log_tail
-  if iface="$(wifi_iface_of_running)"; then
-    pid="$(pid_of_running || true)"
-    printf 'active\t%s\t%s\t\n' "$iface" "$pid"
+  local log_tail
+  if discover_instance; then
+    record_instance "$INST_PID" "$INST_IFACE" "$INST_STARTTIME" "$INST_CONF"
+    printf 'active\t%s\t%s\t\n' "$INST_IFACE" "$INST_PID"
     return 0
   fi
 
@@ -121,13 +301,25 @@ start_create_ap() {
   [ "${#password}" -le 63 ] || die "Security key is longer than 63 characters"
   case "$band" in 2.4|5) ;; *) die "Unsupported Wi-Fi band" ;; esac
 
-  if pid="$(pid_of_running)"; then
-    die "A create_ap hotspot is already running (pid $pid)"
+  # These reach a pkexec command line, so validate before interpolating rather
+  # than trusting whatever nmcli or the panel put in front of us.
+  valid_iface "$wifi" || die "Invalid Wi-Fi interface name"
+  valid_iface "$upstream" || die "Invalid upstream interface name"
+  case "$channel_mode" in auto|manual) ;; *) die "Invalid channel mode" ;; esac
+  if [ "$channel_mode" = manual ]; then
+    case "$channel" in
+      '' | *[!0-9]*) die "Invalid Wi-Fi channel" ;;
+    esac
+    [ "$channel" -ge 1 ] && [ "$channel" -le 196 ] || die "Wi-Fi channel is out of range"
   fi
 
-  mkdir -p "$RUN_DIR"
+  if discover_instance; then
+    die "A create_ap hotspot is already running (pid $INST_PID)"
+  fi
+
+  secure_run_dir || die "Cannot create the state directory: $RUN_DIR"
   : > "$LOG_FILE"
-  chmod 0644 "$LOG_FILE"
+  chmod 0600 "$LOG_FILE"
 
   # /etc/create_ap.conf carries the user's tuned defaults (gateway, sharing
   # method, MAC filter, ...). Load it first, then override with the panel's
@@ -170,10 +362,43 @@ start_create_ap() {
 }
 
 stop_hotspot() {
-  local pid
-  if ! pid="$(pid_of_running)"; then
+  local want="$1" pid saved_pid saved_starttime
+  valid_iface "$want" || [ "$want" = auto ] || die "Invalid Wi-Fi interface name"
+
+  # A pid we recorded earlier but whose start time no longer matches has been
+  # recycled: the create_ap we knew about is gone and the number now belongs to
+  # something unrelated, so refuse rather than signal it.
+  saved_pid="$(record_field pid)"
+  saved_starttime="$(record_field starttime)"
+  discover_instance || return 0
+
+  if [ -n "$saved_pid" ] && [ "$saved_pid" = "$INST_PID" ] &&
+    [ -n "$saved_starttime" ] && [ "$saved_starttime" != "$INST_STARTTIME" ]; then
+    printf 'omaspot: refusing to signal recycled pid %s\n' "$INST_PID" >&2
+    clear_record
     return 0
   fi
+
+  if [ "$want" != auto ] && [ "$INST_IFACE" != "$want" ]; then
+    printf 'omaspot: no validated hotspot on %s (running on %s)\n' "$want" "$INST_IFACE" >&2
+    return 0
+  fi
+
+  pid="$INST_PID"
+
+  # Everything below re-checks the pid immediately before the privileged call.
+  # It was read from a file, and between discovery and signalling the process can
+  # exit and its number can be handed to something else entirely.
+  if ! pid_is_create_ap "$pid" ||
+    [ "$(proc_starttime "$pid" 2>/dev/null)" != "$INST_STARTTIME" ] ||
+    [ "$(read_state_line "$INST_CONF/pid")" != "$pid" ]; then
+    printf 'omaspot: pid %s failed identity re-check; not signalling\n' "$pid" >&2
+    clear_record
+    return 0
+  fi
+
+  record_instance "$pid" "$INST_IFACE" "$INST_STARTTIME" "$INST_CONF"
+
   # Signal the daemon the same way the GUI does. The daemon runs as root, so
   # a plain kill is not permitted; --stop sends SIGUSR1 through create_ap.
   as_root --stop "$pid" >/dev/null 2>&1 || true
@@ -181,10 +406,11 @@ stop_hotspot() {
   # wait up to 10s for the instance to disappear.
   local waited=0
   while [ "$waited" -lt 40 ]; do
-    conf_of_running >/dev/null 2>&1 || break
+    discover_instance >/dev/null 2>&1 || break
     sleep 0.25
     waited=$((waited + 1))
   done
+  clear_record
   : > "$LOG_FILE" 2>/dev/null || true
 }
 
