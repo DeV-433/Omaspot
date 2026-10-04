@@ -1,3 +1,5 @@
+![Omaspot — the bar flyout showing an active hotspot, its QR code, connected devices and network settings](assets/omaspot.png)
+
 # Omaspot
 
 Omaspot is an Omarchy bar plugin for starting and stopping a mobile Wi-Fi
@@ -16,21 +18,39 @@ Features:
 - Automatic or manual channel selection
 - Persistent per-user settings stored outside the plugin checkout
 - Credentials sent over stdin instead of command-line arguments
+- Checks its own dependencies and offers the install command when one is missing
 
 ## Requirements
 
-Omaspot needs the following commands:
+Omaspot drives `create_ap` from
+[linux-wifi-hotspot](https://github.com/lakinduakash/linux-wifi-hotspot), the
+same engine the `wihotspot` GUI uses, plus a few supporting commands:
 
-- `create_ap` from [linux-wifi-hotspot](https://github.com/lakinduakash/linux-wifi-hotspot)
-- `nmcli` from NetworkManager
-- `pkexec` from polkit
-- `qrencode` for the Wi-Fi QR code
-- `iw` to tell which connected devices are associated right now
+| Command | Package | Used for | Required |
+| --- | --- | --- | --- |
+| `create_ap` | `linux-wifi-hotspot` | the hotspot itself | yes |
+| `pkexec` | `polkit` | running `create_ap` as root | yes |
+| `nmcli` | `networkmanager` | interface discovery | yes |
+| `stat` | `coreutils` | instance state ownership checks | yes |
+| `qrencode` | `qrencode` | the QR image | only for the QR |
+| `iw` | `iw` | marking associated devices | only for those markers |
 
 `create_ap` runs `hostapd` and `dnsmasq` as root and drives interfaces with
 `iproute2`; those arrive as dependencies of `linux-wifi-hotspot`.
 
-On Arch Linux/Omarchy, install the package dependencies with:
+### You do not have to install these first
+
+There is no prerequisite step. The first time you open the panel it checks
+everything above, and if something required is missing it replaces the hotspot
+controls with the list of missing packages and a ready-to-run `yay` command
+with a **Copy** button. Run that command in a terminal, reopen the panel, and
+it carries on as normal. See [First run](#first-run).
+
+Only a genuinely required package replaces the controls. Without `qrencode`
+you lose the QR image, and without `iw` you lose the currently-associated
+markers — but a hotspot still starts in both cases, so neither hides the UI.
+
+If you would rather install everything up front:
 
 ```sh
 yay -S --needed linux-wifi-hotspot qrencode iw
@@ -38,17 +58,13 @@ yay -S --needed linux-wifi-hotspot qrencode iw
 
 `qrencode` and `iw` are dependencies of `linux-wifi-hotspot`, so naming them
 is only for clarity — `--needed` skips any that are already present.
-NetworkManager and polkit are normally already present on Omarchy. Check the
-dependencies with:
+NetworkManager and polkit are normally already present on Omarchy.
+
+To check the same state from a terminal:
 
 ```sh
-backend/omaspotctl deps
+backend/omaspotctl doctor
 ```
-
-That verifies `create_ap`, `nmcli`, `pkexec` and `qrencode`. `iw` is optional:
-without it the connected-devices list still works from DHCP leases, but every
-device shows as recently seen rather than currently associated. Omaspot also
-uses `stat` from coreutils on every state read, so it is a hard requirement.
 
 ## Install
 
@@ -76,6 +92,29 @@ omarchy plugin enable io.github.devanshu.omaspot
 
 Omaspot runs as plugin code inside the long-lived Omarchy shell process. Review
 the repository before installing plugins from any source you do not trust.
+
+Installing the plugin is the only setup step. Click the bar icon afterwards:
+if a required package is missing, the panel tells you which one and hands you
+the command to run — see [First run](#first-run).
+
+## First run
+
+The check runs on **every** open, not just the first, so returning from a
+terminal after installing is enough — there is nothing to reload and no
+restart to perform. The toggle is hidden while the gate is up, and a start is
+refused outright, so a hotspot can never be launched without `create_ap`
+behind it.
+
+The check comes from `omaspotctl doctor`, which reports each dependency as
+`ok` or `missing` and labels it `blocking` or `optional`; it also composes the
+`yay` command, so the copyable string is built in one place instead of being
+assembled in QML.
+
+The copy button uses `wl-copy` from `wl-clipboard`, quoted with
+`Util.shellQuote` so the command reaches it as a single argument. Omaspot
+checks the install command matches a plain `yay -S --needed <packages>` shape
+before offering it, so a malformed or spoofed backend response cannot put
+arbitrary text on the clipboard.
 
 ## Defaults and settings
 
@@ -142,26 +181,6 @@ station table rather than `create_ap --list-clients`, which needs root and
 would prompt on every refresh. Hostnames come from DHCP and are therefore
 attacker-controlled, so every field is validated against a strict pattern
 before it reaches the panel.
-
-## First run
-
-The panel checks its dependencies every time it is opened. When a package that
-is required for a hotspot is missing, the flyout replaces the hotspot controls
-with the list of missing packages and a ready-to-run `yay` command with a
-**Copy** button, so nothing has to be typed by hand. Installing the packages
-and reopening the panel is enough; there is nothing to reload.
-
-The check comes from `omaspotctl doctor`, which reports every dependency as
-`ok` or `missing` and marks each `blocking` or `optional`. Only a missing
-blocking dependency gates the UI: a missing `qrencode` costs the QR image and a
-missing `iw` costs the currently-associated markers, but neither stops the
-panel from starting a hotspot, so neither may hide the controls.
-
-The copy button uses `wl-copy` from `wl-clipboard`, quoted with
-`Util.shellQuote` so the command reaches it as a single argument. Omaspot
-checks the install command matches a plain `yay -S --needed <packages>` shape
-before offering it, so a malformed or spoofed backend response cannot put
-arbitrary text on the clipboard.
 
 ## Instance state and trust
 
