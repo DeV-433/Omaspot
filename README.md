@@ -25,21 +25,30 @@ Omaspot needs the following commands:
 - `nmcli` from NetworkManager
 - `pkexec` from polkit
 - `qrencode` for the Wi-Fi QR code
+- `iw` to tell which connected devices are associated right now
+
+`create_ap` runs `hostapd` and `dnsmasq` as root and drives interfaces with
+`iproute2`; those arrive as dependencies of `linux-wifi-hotspot`.
 
 On Arch Linux/Omarchy, install the package dependencies with:
 
 ```sh
-yay -S --needed linux-wifi-hotspot qrencode
+yay -S --needed linux-wifi-hotspot qrencode iw
 ```
 
-NetworkManager and polkit are normally already present on Omarchy. Check all
+`qrencode` and `iw` are dependencies of `linux-wifi-hotspot`, so naming them
+is only for clarity — `--needed` skips any that are already present.
+NetworkManager and polkit are normally already present on Omarchy. Check the
 dependencies with:
 
 ```sh
-for command in create_ap nmcli pkexec qrencode; do
-  command -v "$command" || echo "missing: $command"
-done
+backend/omaspotctl deps
 ```
+
+That verifies `create_ap`, `nmcli`, `pkexec` and `qrencode`. `iw` is optional:
+without it the connected-devices list still works from DHCP leases, but every
+device shows as recently seen rather than currently associated. Omaspot also
+uses `stat` from coreutils on every state read, so it is a hard requirement.
 
 ## Install
 
