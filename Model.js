@@ -114,6 +114,38 @@ function parseClients(raw) {
   return result
 }
 
+// Dependency report from `omaspotctl doctor`.
+//
+// Per dependency line: state <TAB> command <TAB> package <TAB> level, where
+// state is ok|missing and level is blocking|optional. A final
+// `install <TAB> <command>` line appears only when something blocking is
+// absent. Only missing entries are returned; `blocking` is what gates the UI.
+function parseDoctor(raw) {
+  var lines = String(raw || "").replace(/\r/g, "").split("\n")
+  var blocking = []
+  var optional = []
+  var install = ""
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].trim() === "") continue
+    var fields = lines[i].split("\t")
+    if (fields[0] === "install") {
+      // Only ever offer to copy a plain pacman invocation. The backend is
+      // trusted, but this string lands on the clipboard, so it is constrained
+      // here rather than passed through unchecked.
+      var candidate = String(fields[1] || "").trim()
+      if (/^yay -S --needed( [A-Za-z0-9._+-]+)+$/.test(candidate)) install = candidate
+      continue
+    }
+    if (fields.length < 4 || fields[0] !== "missing") continue
+    var pkg = String(fields[2] || "").trim()
+    if (!/^[A-Za-z0-9._+-]+$/.test(pkg)) continue
+    var entry = { command: String(fields[1] || "").trim(), package: pkg }
+    if (fields[3] === "optional") optional.push(entry)
+    else blocking.push(entry)
+  }
+  return { blocking: blocking, optional: optional, install: install }
+}
+
 function validChannel(value) {
   return /^(1|2|3|4|5|6|7|8|9|10|11|12|13|14|36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165)$/.test(String(value))
 }
@@ -136,6 +168,7 @@ if (typeof module !== "undefined") {
     parseStatus: parseStatus,
     parseInterfaces: parseInterfaces,
     parseClients: parseClients,
+    parseDoctor: parseDoctor,
     parseAsciiQr: parseAsciiQr,
     validChannel: validChannel,
     validate: validate

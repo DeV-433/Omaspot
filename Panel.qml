@@ -37,6 +37,12 @@ Panel {
   property bool passwordVisible: false
   property bool startPending: false
   property var connectedDevices: []
+  // Dependency report. `depsBlocked` hides the hotspot controls entirely until
+  // the packages that make a hotspot possible are installed.
+  property var missingBlocking: []
+  property var missingOptional: []
+  property string installCommand: ""
+  property bool installCopied: false
 
   readonly property string moduleId: "io.github.devanshu.omaspot"
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/settings"
@@ -44,6 +50,7 @@ Panel {
   readonly property string backendPath: String(Qt.resolvedUrl("backend/omaspotctl")).replace(/^file:\/\//, "")
   readonly property bool busy: status === "starting" || status === "stopping"
   readonly property bool hotspotActive: status === "active"
+  readonly property bool depsBlocked: missingBlocking.length > 0
   readonly property string statusLabel: status === "active" ? "Active"
     : status === "starting" ? "Starting…"
     : status === "stopping" ? "Stopping…" : "Inactive"
@@ -119,6 +126,37 @@ Panel {
     if (!interfacesProc.running) interfacesProc.running = true
   }
 
+  // Dependency check. Runs on every open so returning from a terminal after
+  // installing the packages immediately reveals the working UI again.
+  function refreshDependencies() {
+    if (!dependencyProc.running) dependencyProc.running = true
+  }
+
+  function applyDependencies(raw) {
+    var report = Model.parseDoctor(raw)
+    var wasBlocked = root.depsBlocked
+    missingBlocking = report.blocking
+    missingOptional = report.optional
+    installCommand = report.install
+    // Refresh the rest of the panel once, the moment the gate opens. Deliberately
+    // not refreshAll(): that would re-run this same dependency check.
+    if (wasBlocked && !root.depsBlocked) {
+      installCopied = false
+      refreshStatus()
+      refreshInterfaces()
+      refreshClients()
+    }
+  }
+
+  // Copy follows the built-in panels: Util.shellQuote keeps the value a single
+  // shell argument, so the command is never re-parsed by bash.
+  function copyInstallCommand() {
+    if (!installCommand) return
+    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(installCommand) + " | wl-copy"])
+    installCopied = true
+    copiedTimer.restart()
+  }
+
   // Reads DHCP leases and the iw station table from the already-validated
   // instance state, so this never needs polkit and never blocks on a prompt.
   function refreshClients() {
@@ -130,10 +168,10 @@ Panel {
   }
 
   function refreshAll() {
+    refreshDependencies()
     refreshStatus()
     refreshInterfaces()
     refreshClients()
-    if (!dependencyProc.running) dependencyProc.running = true
   }
 
   function applyStatus(raw) {
@@ -175,6 +213,12 @@ Panel {
   }
 
   function startHotspot() {
+    // Belt and braces: the toggle is hidden while deps are missing, but never
+    // let a start reach pkexec without create_ap behind it.
+    if (depsBlocked) {
+      showError("Omaspot still needs " + missingBlocking[0].package)
+      return
+    }
     var errors = Model.validate({ ssid: ssid, password: password, band: band, channelMode: channelMode, channel: channel })
     if (errors.length > 0) {
       showError(errors.join(" · "))
@@ -287,10 +331,14 @@ Panel {
 
   Process {
     id: dependencyProc
-    command: [root.backendPath, "deps"]
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: function() {} }
-    onExited: function(code) {
-      if (code !== 0) root.statusError = "Required hotspot tooling is missing"
+    command: [root.backendPath, "doctor"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyDependencies(text) }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "").trim()
+        if (message !== "") root.statusError = message
+      }
     }
   }
 
@@ -377,6 +425,7 @@ Panel {
     }
   }
   Timer { id: qrTimer; interval: 220; repeat: false; onTriggered: root.generateQr() }
+  Timer { id: copiedTimer; interval: 1800; repeat: false; onTriggered: root.installCopied = false }
   Timer { id: errorTimer; interval: 8000; repeat: false; onTriggered: root.clearError() }
 
   Component.onCompleted: {
@@ -430,8 +479,10 @@ Panel {
             font.bold: true
           }
           Text {
-            text: root.hotspotInterface !== "" ? "Sharing via " + root.hotspotInterface : "Personal Wi-Fi hotspot"
-            color: Color.muted
+            text: root.depsBlocked
+              ? "Hotspot support is not installed"
+              : root.hotspotInterface !== "" ? "Sharing via " + root.hotspotInterface : "Personal Wi-Fi hotspot"
+            color: root.depsBlocked ? Color.urgent : Color.muted
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -440,6 +491,7 @@ Panel {
         ToggleSwitch {
           id: toggleControl
           anchors.verticalCenter: parent.verticalCenter
+          // A hotspot cannot be started without create_ap, so do not offer it.
           checked: root.hotspotActive || root.status === "starting"
           busy: root.busy
           enabled: !root.busy
@@ -449,9 +501,132 @@ Panel {
         }
       }
 
-      Row {
+      // Shown instead of the hotspot controls while a required package is absent.
+      // Everything here is backend-provided text; the copy button is the only action
+      // so a first-run user cannot start a half-working configuration.
+      Rectangle {
+        id: installCard
         width: parent.width
-        spacing: Style.space(8)
+        height: installCardInner.implicitHeight + Style.space(24)
+        radius: Style.cornerRadius
+        color: Color.background
+        border.color: Color.popups.border
+        border.width: Math.max(1, Style.space(1))
+        visible: root.depsBlocked
+
+        Column {
+          id: installCardInner
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.margins: Style.space(12)
+          spacing: Style.space(8)
+
+          Text {
+            width: parent.width
+            text: "Omaspot needs these packages before it can share a hotspot:"
+            color: root.foreground
+            wrapMode: Text.Wrap
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+
+          Repeater {
+            model: root.missingBlocking
+            Row {
+              required property var modelData
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                width: Style.space(10)
+                text: "•"
+                color: Color.urgent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                width: parent.width - Style.space(10) - parent.spacing
+                text: modelData.package
+                color: root.foreground
+                elide: Text.ElideRight
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.installCommand !== ""
+            text: "Run this in a terminal, then reopen the panel:"
+            color: Color.muted
+            wrapMode: Text.Wrap
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          Rectangle {
+            width: parent.width
+            height: Style.space(38)
+            radius: Style.space(6)
+            color: Color.popups.background
+            border.color: root.installCopied ? Color.accent : Color.popups.border
+            border.width: Math.max(1, Style.space(1))
+
+            Text {
+              anchors.left: parent.left
+              anchors.right: copyInstall.width
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.installCommand !== "" ? root.installCommand : "yay -S --needed linux-wifi-hotspot"
+              color: root.foreground
+              elide: Text.ElideRight
+              font.family: "monospace"
+              font.pixelSize: Style.font.caption
+            }
+
+            Button {
+              id: copyInstall
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.rightMargin: Style.space(4)
+              text: root.installCopied ? "Copied" : "Copy"
+              onClicked: root.copyInstallCommand()
+            }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              id: recheckButton
+              text: "Re-check"
+              onClicked: {
+                root.installCopied = false
+                root.refreshDependencies()
+              }
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - recheckButton.width - Style.space(8)
+              text: "Installing the packages changes nothing here until you reload."
+              color: Color.muted
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+      }
+
+      Row {
+        visible: !root.depsBlocked
+        width: parent.width
+        spacing: Style.space(10)
         Text {
           text: "●  " + root.statusLabel
           color: root.statusColor
@@ -469,6 +644,7 @@ Panel {
       }
 
       Rectangle {
+        visible: !root.depsBlocked
         id: qrCard
         width: parent.width
         height: Style.space(220)
@@ -551,6 +727,7 @@ Panel {
       }
 
       Text {
+        visible: !root.depsBlocked
         visible: root.errorMessage !== "" || root.statusError !== ""
         width: parent.width
         text: root.errorMessage !== "" ? root.errorMessage : root.statusError
@@ -565,6 +742,7 @@ Panel {
       // hotspot cannot push the settings below it off screen. ListView contributes
       // no implicitHeight, which is what keeps the card the same size as before.
       Column {
+        visible: !root.depsBlocked
         id: devicesColumn
         width: parent.width
         spacing: Style.space(4)
@@ -646,6 +824,7 @@ Panel {
       }
 
       Text {
+        visible: !root.depsBlocked
         text: "Network settings"
         color: root.foreground
         font.family: Style.font.family
@@ -654,6 +833,7 @@ Panel {
       }
 
       Dropdown {
+        visible: !root.depsBlocked
         id: upstreamDropdown
         width: parent.width
         label: "Upstream interface"
@@ -664,6 +844,7 @@ Panel {
       }
 
       Row {
+        visible: !root.depsBlocked
         width: parent.width
         spacing: Style.space(6)
         Text {
@@ -686,6 +867,7 @@ Panel {
       }
 
       Row {
+        visible: !root.depsBlocked
         width: parent.width
         spacing: Style.space(6)
         Text {
@@ -717,6 +899,7 @@ Panel {
       }
 
       Row {
+        visible: !root.depsBlocked
         width: parent.width
         spacing: Style.space(8)
         Column {
@@ -756,6 +939,7 @@ Panel {
       }
 
       Text {
+        visible: !root.depsBlocked
         width: parent.width
         text: "Credentials are stored locally. Powered by create_ap (linux-wifi-hotspot)."
         color: Color.muted

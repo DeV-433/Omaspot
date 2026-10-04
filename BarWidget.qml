@@ -7,6 +7,9 @@ BarWidget {
   moduleName: "io.github.devanshu.omaspot"
 
   readonly property string status: panelLoader.item ? panelLoader.item.status : "inactive"
+  // Surfaced from the panel so the bar warns before the flyout is even opened.
+  readonly property bool depsBlocked: panelLoader.item
+    ? panelLoader.item.depsBlocked === true : false
   // Access-point is deliberately different from the regular Wi-Fi glyph used
   // by omarchy.network. Keep this a single, neutral bar mark in every state;
   // status and color belong in the flyout, not in the compact bar slot.
@@ -60,7 +63,8 @@ BarWidget {
     text: root.statusIcon
     active: false
     useActiveColor: false
-    tooltipText: root.status === "active" ? "Hotspot active · open Omaspot"
+    tooltipText: root.depsBlocked ? "Omaspot needs linux-wifi-hotspot · open to install"
+      : root.status === "active" ? "Hotspot active · open Omaspot"
       : "Hotspot inactive · open Omaspot"
     slotSize: Style.bar.statusSlot
     onPressed: function(buttonCode) {

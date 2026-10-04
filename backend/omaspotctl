@@ -545,12 +545,62 @@ deps() {
   [ "$found" -eq 1 ]
 }
 
+# Single source of truth for what the plugin needs, as
+# command|package|blocking|install command.
+#
+# `blocking` means the panel cannot offer a working hotspot without it and
+# should tell the user what to install. `optional` means only one feature
+# degrades: without qrencode there is no QR image, without iw the device list
+# falls back to DHCP leases and nothing is marked as currently associated.
+# stat is blocking because every instance-state read inspects ownership and
+# mode with it.
+DEP_SPECS=(
+  'create_ap|linux-wifi-hotspot|blocking|yay -S --needed linux-wifi-hotspot'
+  'pkexec|polkit|blocking|yay -S --needed polkit'
+  'nmcli|networkmanager|blocking|yay -S --needed networkmanager'
+  'stat|coreutils|blocking|yay -S --needed coreutils'
+  'qrencode|qrencode|optional|yay -S --needed qrencode'
+  'iw|iw|optional|yay -S --needed iw'
+)
+
+# Reports each dependency so the panel can explain a missing package instead of
+# failing opaquely. Emits one line per entry as
+#   ok|missing <TAB> command <TAB> package <TAB> blocking|optional
+# followed by a single install line when something blocking is absent, so the
+# copyable command is composed here rather than in QML:
+#   install <TAB> yay -S --needed pkg pkg
+doctor() {
+  local spec cmd package level install present
+  local -a absent=()
+
+  for spec in "${DEP_SPECS[@]}"; do
+    IFS='|' read -r cmd package level install <<<"$spec"
+    if command -v "$cmd" >/dev/null 2>&1; then
+      present=ok
+    else
+      present=missing
+      [ "$level" = blocking ] && absent+=("$package")
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$present" "$cmd" "$package" "$level"
+  done
+
+  if [ "${#absent[@]}" -gt 0 ]; then
+    printf 'install\tyay -S --needed'
+    for package in "${absent[@]}"; do
+      printf ' %s' "$package"
+    done
+    printf '\n'
+  fi
+  return 0
+}
+
 command_name="${1:-}"
 shift || true
 case "$command_name" in
   interfaces) interfaces ;;
   status) status ;;
   deps) deps ;;
+  doctor) [ "$#" -eq 0 ] || die "doctor expects no arguments"; doctor ;;
   start) [ "$#" -eq 5 ] || die "start expects wifi, upstream, band, channel mode, channel"; start_create_ap "$@" ;;
   stop) [ "$#" -eq 1 ] || die "stop expects a Wi-Fi interface"; stop_hotspot "$1" ;;
   clients) [ "$#" -eq 0 ] || die "clients expects no arguments"; clients ;;

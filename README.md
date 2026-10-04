@@ -133,7 +133,7 @@ bash -n backend/omaspotctl
 ```
 
 The backend exposes the small protocol used by the QML panel:
-`status`, `interfaces`, `deps`, `clients`, `start`, `stop`, and `qr`.
+`status`, `interfaces`, `deps`, `doctor`, `clients`, `start`, `stop`, and `qr`.
 
 `clients` is read-only and never escalates: it reports the tab-separated
 `mac`, `ip`, `hostname`, `state` of each client it finds, newest lease first.
@@ -142,6 +142,26 @@ station table rather than `create_ap --list-clients`, which needs root and
 would prompt on every refresh. Hostnames come from DHCP and are therefore
 attacker-controlled, so every field is validated against a strict pattern
 before it reaches the panel.
+
+## First run
+
+The panel checks its dependencies every time it is opened. When a package that
+is required for a hotspot is missing, the flyout replaces the hotspot controls
+with the list of missing packages and a ready-to-run `yay` command with a
+**Copy** button, so nothing has to be typed by hand. Installing the packages
+and reopening the panel is enough; there is nothing to reload.
+
+The check comes from `omaspotctl doctor`, which reports every dependency as
+`ok` or `missing` and marks each `blocking` or `optional`. Only a missing
+blocking dependency gates the UI: a missing `qrencode` costs the QR image and a
+missing `iw` costs the currently-associated markers, but neither stops the
+panel from starting a hotspot, so neither may hide the controls.
+
+The copy button uses `wl-copy` from `wl-clipboard`, quoted with
+`Util.shellQuote` so the command reaches it as a single argument. Omaspot
+checks the install command matches a plain `yay -S --needed <packages>` shape
+before offering it, so a malformed or spoofed backend response cannot put
+arbitrary text on the clipboard.
 
 ## Instance state and trust
 
