@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.devanshu.omaspot",
   "name": "Omaspot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Devanshu",
   "license": "MIT",
   "description": "A compact Omarchy bar controller for a create_ap Wi-Fi hotspot.",
