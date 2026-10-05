@@ -577,7 +577,7 @@ Panel {
 
             Text {
               anchors.left: parent.left
-              anchors.right: copyInstall.width
+              anchors.right: copyInstall.left
               anchors.leftMargin: Style.space(10)
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
@@ -727,8 +727,7 @@ Panel {
       }
 
       Text {
-        visible: !root.depsBlocked
-        visible: root.errorMessage !== "" || root.statusError !== ""
+        visible: !root.depsBlocked && (root.errorMessage !== "" || root.statusError !== "")
         width: parent.width
         text: root.errorMessage !== "" ? root.errorMessage : root.statusError
         color: Color.urgent
@@ -742,11 +741,10 @@ Panel {
       // hotspot cannot push the settings below it off screen. ListView contributes
       // no implicitHeight, which is what keeps the card the same size as before.
       Column {
-        visible: !root.depsBlocked
         id: devicesColumn
         width: parent.width
         spacing: Style.space(4)
-        visible: root.hotspotActive
+        visible: !root.depsBlocked && root.hotspotActive
 
         Text {
           text: "Connected devices"
