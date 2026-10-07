@@ -193,6 +193,39 @@ has been proven root-owned and unwritable by anyone else, refuses symlinks, and
 matches every pid against `/proc` — uid, `argv`, and start time — before it
 reaches a privileged command.
 
+### The shared `create_ap.common.conf`
+
+`create_ap` has the same weakness one level up, and it lives upstream rather
+than in this plugin. It adopts `/tmp/create_ap.common.conf` with a bare
+`mkdir -p`, then during cleanup runs as root:
+
+```sh
+for x in $COMMON_CONFDIR/*.pid; do [[ -f $x ]] && kill -9 $(cat $x); done
+```
+
+and restores `/proc/sys/net/ipv4/ip_forward`, `bridge-nf-call-iptables` and
+`${IFACE}_forwarding` from files in that same directory. Anyone who can create
+the directory first therefore gets an arbitrary root `SIGKILL` on the next
+teardown, and arbitrary writes to `/proc/sys`. This affects every `create_ap`
+user — `wihotspot-gui` ships under the same polkit action with the same
+exposure — and it remains unfixed upstream.
+
+`create_ap` sets `umask 077` before creating the directory, so one it creates
+itself is `0700` and root-owned. Only a directory that already existed and
+belongs to someone else is dangerous, so Omaspot refuses to start **or stop**
+while it finds one, and points at the single command that clears it:
+
+```sh
+sudo rm -rf /tmp/create_ap.common.conf
+```
+
+Only root can remove someone else's directory out of a sticky `/tmp`.
+
+This cannot be sanitized from the caller's side: polkit authorizes
+`exec.path == /usr/bin/create_ap` exactly, so wrapping the invocation in a root
+script that cleaned the directory first would lose the action and prompt on
+every toggle. The real fix has to land upstream.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

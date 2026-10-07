@@ -22,6 +22,11 @@ set -o pipefail
 
 CREATE_AP_BIN=/usr/bin/create_ap
 
+# create_ap adopts this directory with a bare `mkdir -p` and then, during
+# cleanup, `kill -9`s every pid file inside it and restores /proc/sys values
+# from it -- all as root. See common_conf_dir_safe.
+COMMON_CONF_DIR=/tmp/create_ap.common.conf
+
 # Keep this identical to Panel.qml's statePath. Quickshell and its child
 # Process can carry different XDG_STATE_HOME values, while Omarchy's plugin
 # state contract here is explicitly ~/.local/state/omarchy/settings.
@@ -185,6 +190,37 @@ pid_is_create_ap() {
   [ "$found" -eq 1 ]
 }
 
+# create_ap creates /tmp/create_ap.common.conf with a bare `mkdir -p`, which
+# silently adopts a directory that already existed. During cleanup it then does,
+# as root:
+#
+#   for x in $COMMON_CONFDIR/*.pid; do [[ -f $x ]] && kill -9 $(cat $x); done
+#
+# and restores /proc/sys/net/ipv4/ip_forward, bridge-nf-call-iptables and
+# ${IFACE}_forwarding from files in the same directory. So anyone who can plant
+# that directory gets an arbitrary root SIGKILL on the next create_ap teardown.
+#
+# create_ap sets umask 077 before mkdir, so a directory it creates itself is
+# 0700 and root-owned -- safe. The only dangerous case is one that already
+# existed and belongs to somebody else, which is exactly what we refuse to hand
+# it. This cannot be fixed from the caller's side: polkit authorizes
+# exec.path == /usr/bin/create_ap exactly, so a root wrapper that sanitized the
+# directory first would lose the action and prompt on every toggle.
+common_conf_dir_safe() {
+  [ -e "$COMMON_CONF_DIR" ] || return 0
+  [ -d "$COMMON_CONF_DIR" ] || return 1
+  root_owned_unwritable "$COMMON_CONF_DIR"
+}
+
+# Refuse with the one command that actually clears it. Only root may remove
+# someone else's directory out of a sticky /tmp.
+require_safe_common_conf_dir() {
+  common_conf_dir_safe && return 0
+  die "Refusing to touch the hotspot: $COMMON_CONF_DIR is not owned by root.
+Someone planted it, and create_ap would kill whatever pid it names as root.
+Clear it with: sudo rm -rf $COMMON_CONF_DIR"
+}
+
 secure_run_dir() {
   mkdir -p "$RUN_DIR" 2>/dev/null || return 1
   chmod 0700 "$RUN_DIR" 2>/dev/null || true
@@ -317,6 +353,8 @@ start_create_ap() {
     die "A create_ap hotspot is already running (pid $INST_PID)"
   fi
 
+  require_safe_common_conf_dir
+
   secure_run_dir || die "Cannot create the state directory: $RUN_DIR"
   : > "$LOG_FILE"
   chmod 0600 "$LOG_FILE"
@@ -398,6 +436,14 @@ stop_hotspot() {
   fi
 
   record_instance "$pid" "$INST_IFACE" "$INST_STARTTIME" "$INST_CONF"
+
+  # Stopping makes create_ap run its cleanup, which kills whatever pids it finds
+  # in the shared common state dir. Guard that too, not just start.
+  if ! common_conf_dir_safe; then
+    printf 'omaspot: %s\n' "Refusing to stop: $COMMON_CONF_DIR is not owned by root" >&2
+    printf 'omaspot: %s\n' "Clear it with: sudo rm -rf $COMMON_CONF_DIR" >&2
+    return 0
+  fi
 
   # Signal the daemon the same way the GUI does. The daemon runs as root, so
   # a plain kill is not permitted; --stop sends SIGUSR1 through create_ap.
