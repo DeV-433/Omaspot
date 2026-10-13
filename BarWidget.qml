@@ -13,7 +13,8 @@ BarWidget {
   // Access-point is deliberately different from the regular Wi-Fi glyph used
   // by omarchy.network. Keep this a single, neutral bar mark in every state;
   // status and color belong in the flyout, not in the compact bar slot.
-  readonly property string statusIcon: "󰀂"
+  readonly property string statusIcon: root.status === "active"
+    ? "󱜠" : "󱜡"
 
   function injectPanel() {
     if (!panelLoader.item) return
@@ -61,7 +62,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.statusIcon
-    active: false
+    active: root.status === "active"
     useActiveColor: false
     tooltipText: root.depsBlocked ? "Omaspot needs linux-wifi-hotspot · open to install"
       : root.status === "active" ? "Hotspot active · open Omaspot"

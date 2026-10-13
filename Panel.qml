@@ -22,6 +22,7 @@ Panel {
   property string status: "inactive"
   property string hotspotInterface: ""
   property string statusError: ""
+  property real lastStatusTickMs: 0
   property string errorMessage: ""
   property string ssid: "Omaspot"
   property string password: "omaspot123"
@@ -177,6 +178,8 @@ Panel {
   function applyStatus(raw) {
     var result = Model.parseStatus(raw)
     var previous = status
+    // While a start is settling, trust the pending state instead of flickering
+    // to inactive on the first polls.
     if (startPending && result.state === "inactive") return
     status = result.state
     hotspotInterface = result.hotspotInterface
@@ -187,6 +190,20 @@ Panel {
       saveState("active")
       scheduleQr()
       refreshClients()
+    }
+    if (status === "inactive" && previous === "active") {
+      // The hotspot went away without us asking -- e.g. the laptop suspended,
+      // the Wi-Fi interface reset, or hostapd died. Reflect that in the panel
+      // instead of leaving the toggle pinned in the "on" position.
+      startPending = false
+      startSettleTimer.stop()
+      if (errorMessage === "" && statusError === "")
+        showError("Hotspot stopped")
+      saveState("inactive")
+      qrReady = false
+      qrRows = []
+      qrSize = 0
+      connectedDevices = []
     }
     if (status === "inactive" && (previous === "stopping" || previous === "starting")) {
       if (previous === "starting" && errorMessage === "" && statusError === "")
@@ -404,7 +421,25 @@ Panel {
 
   Process { id: notifyProc }
 
-  Timer { id: statusTimer; interval: 3000; repeat: true; running: true; onTriggered: root.refreshStatus() }
+  Timer {
+    id: statusTimer
+    interval: 3000
+    repeat: true
+    running: true
+    onTriggered: {
+      var now = (new Date()).getTime()
+      // Monotonic QML timers freeze across suspend; a large wall-clock gap
+      // means the machine slept and woke. Reconcile immediately instead of
+      // waiting for the next few polls.
+      if (root.lastStatusTickMs > 0 && now - root.lastStatusTickMs > 8000) {
+        root.startPending = false
+        root.startSettleTimer.stop()
+        root.refreshAll()
+      }
+      root.lastStatusTickMs = now
+      root.refreshStatus()
+    }
+  }
   // Only polls while the hotspot is up; the backend exits immediately otherwise.
   Timer {
     id: clientsTimer
@@ -748,9 +783,9 @@ Panel {
 
         Text {
           text: "Connected devices"
-          color: Color.muted
+          color: root.foreground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Style.font.subtitle
           font.bold: true
         }
 
@@ -936,15 +971,6 @@ Panel {
         }
       }
 
-      Text {
-        visible: !root.depsBlocked
-        width: parent.width
-        text: "Credentials are stored locally. Powered by create_ap (linux-wifi-hotspot)."
-        color: Color.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.Wrap
-      }
     }
   }
 }

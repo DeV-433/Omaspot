@@ -251,6 +251,40 @@ clear_record() {
   rm -f "$STATE_FILE" "$STATE_FILE.tmp" 2>/dev/null || true
 }
 
+# The create_ap wrapper can survive while the pieces that actually make a
+# hotspot have died (hostapd gone, AP interface torn down) -- most commonly
+# after a suspend/resume cycle or an interface reset. Treat such an instance as
+# not running so the bar does not stay "active" for a dead hotspot.
+pid_not_zombie() {
+  local pid="$1" state
+  [ -r "/proc/$pid/stat" ] || return 1
+  IFS= read -r state <"/proc/$pid/stat" 2>/dev/null || return 1
+  state="${state##*) }"
+  set -- $state
+  [ "${1:-}" != "Z" ]
+}
+
+instance_hostapd_alive() {
+  local conf="$1" p comm found=0
+  for p in /proc/[0-9]*; do
+    [ -r "$p/cmdline" ] || continue
+    comm=""
+    read -r comm <"$p/comm" 2>/dev/null || continue
+    [ "$comm" = "hostapd" ] || continue
+    if grep -qaF "$conf" "$p/cmdline" 2>/dev/null; then
+      found=1
+      break
+    fi
+  done
+  [ "$found" -eq 1 ]
+}
+
+instance_interface_is_ap() {
+  local iface="$1"
+  command -v iw >/dev/null 2>&1 || return 0
+  iw dev "$iface" info 2>/dev/null | grep -q 'type[[:space:]]*AP'
+}
+
 # Fills INST_* with an instance that passed every check, or returns non-zero
 # when nothing trustworthy is running. Discovery order is irrelevant because a
 # spoofed directory cannot clear trusted_conf_dir.
@@ -267,8 +301,12 @@ discover_instance() {
     valid_pid "$pid" || continue
     pid_is_create_ap "$pid" || continue
     starttime="$(proc_starttime "$pid")" || continue
+    pid_not_zombie "$pid" || continue
     iface="$(read_state_line "$dir/wifi_iface")"
     valid_iface "$iface" || continue
+    [ -d "/sys/class/net/$iface" ] || continue
+    instance_hostapd_alive "$dir" || continue
+    instance_interface_is_ap "$iface" || continue
     INST_CONF="$dir"
     INST_PID="$pid"
     INST_IFACE="$iface"
@@ -303,6 +341,7 @@ running_record() {
     [ -n "$log_tail" ] && printf 'omaspot: %s\n' "$log_tail" >&2
     : > "$LOG_FILE" 2>/dev/null || true
   fi
+  clear_record
   printf 'inactive\t\t\t\n'
 }
 
@@ -408,7 +447,29 @@ stop_hotspot() {
   # something unrelated, so refuse rather than signal it.
   saved_pid="$(record_field pid)"
   saved_starttime="$(record_field starttime)"
-  discover_instance || return 0
+  if ! discover_instance; then
+    # The instance may have died (suspend, interface reset, killed hostapd)
+    # while the create_ap wrapper is still around. If we have a validated
+    # record of that pid, signal it once so its cleanup actually runs.
+    if [ -n "$saved_pid" ] && valid_pid "$saved_pid" && pid_is_create_ap "$saved_pid"; then
+      local current_starttime
+      current_starttime="$(proc_starttime "$saved_pid" 2>/dev/null || true)"
+      if [ -n "$saved_starttime" ] && [ "$current_starttime" = "$saved_starttime" ]; then
+        if [ "$want" = auto ] || [ "$want" = "$(record_field wifi_iface 2>/dev/null || true)" ]; then
+          as_root --stop "$saved_pid" >/dev/null 2>&1 || true
+          local waited=0
+          while [ "$waited" -lt 20 ]; do
+            pid_is_create_ap "$saved_pid" >/dev/null 2>&1 || break
+            sleep 0.25
+            waited=$((waited + 1))
+          done
+        fi
+      fi
+    fi
+    clear_record
+    : > "$LOG_FILE" 2>/dev/null || true
+    return 0
+  fi
 
   if [ -n "$saved_pid" ] && [ "$saved_pid" = "$INST_PID" ] &&
     [ -n "$saved_starttime" ] && [ "$saved_starttime" != "$INST_STARTTIME" ]; then
