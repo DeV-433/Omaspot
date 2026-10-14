@@ -922,6 +922,7 @@ Panel {
         }
         TextField {
           id: channelField
+          enabled: root.opened
           visible: root.channelMode === "manual"
           width: Style.space(74)
           text: root.channel
@@ -941,6 +942,7 @@ Panel {
           Text { text: "Hotspot name"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           TextField {
             id: ssidField
+            enabled: root.opened
             width: parent.width
             text: root.ssid
             placeholderText: "Omaspot"
@@ -956,6 +958,7 @@ Panel {
             spacing: Style.space(4)
             TextField {
               id: passwordField
+              enabled: root.opened
               width: parent.width - showPassword.width - parent.spacing
               text: root.password
               password: !root.passwordVisible
