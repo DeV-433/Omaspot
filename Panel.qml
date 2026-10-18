@@ -10,6 +10,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 Panel {
@@ -55,11 +56,11 @@ Panel {
   readonly property string statusLabel: status === "active" ? "Active"
     : status === "starting" ? "Starting…"
     : status === "stopping" ? "Stopping…" : "Inactive"
-  readonly property color foreground: bar ? bar.barForeground : Color.foreground
-  readonly property color surface: Color.popups.background
-  readonly property color statusColor: status === "active" ? Color.accent
-    : (status === "starting" || status === "stopping") ? Color.accent
-    : statusError !== "" || errorMessage !== "" ? Color.urgent : Color.muted
+  readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
+  readonly property color surface: Commons.Color.popups.background
+  readonly property color statusColor: status === "active" ? Commons.Color.accent
+    : (status === "starting" || status === "stopping") ? Commons.Color.accent
+    : statusError !== "" || errorMessage !== "" ? Commons.Color.urgent : Commons.Color.muted
 
   function open() {
     root.controller.show()
@@ -178,8 +179,6 @@ Panel {
   function applyStatus(raw) {
     var result = Model.parseStatus(raw)
     var previous = status
-    // While a start is settling, trust the pending state instead of flickering
-    // to inactive on the first polls.
     if (startPending && result.state === "inactive") return
     status = result.state
     hotspotInterface = result.hotspotInterface
@@ -192,9 +191,6 @@ Panel {
       refreshClients()
     }
     if (status === "inactive" && previous === "active") {
-      // The hotspot went away without us asking -- e.g. the laptop suspended,
-      // the Wi-Fi interface reset, or hostapd died. Reflect that in the panel
-      // instead of leaving the toggle pinned in the "on" position.
       startPending = false
       startSettleTimer.stop()
       if (errorMessage === "" && statusError === "")
@@ -210,8 +206,6 @@ Panel {
         showError("The hotspot exited before becoming active")
       saveState("inactive")
     }
-    // Drop the device list whenever we are not active so the flyout never shows
-    // a stale roster for a hotspot that has stopped.
     if (status !== "active" && connectedDevices.length > 0) connectedDevices = []
   }
 
@@ -428,9 +422,6 @@ Panel {
     running: true
     onTriggered: {
       var now = (new Date()).getTime()
-      // Monotonic QML timers freeze across suspend; a large wall-clock gap
-      // means the machine slept and woke. Reconcile immediately instead of
-      // waiting for the next few polls.
       if (root.lastStatusTickMs > 0 && now - root.lastStatusTickMs > 8000) {
         root.startPending = false
         root.startSettleTimer.stop()
@@ -517,7 +508,7 @@ Panel {
             text: root.depsBlocked
               ? "Hotspot support is not installed"
               : root.hotspotInterface !== "" ? "Sharing via " + root.hotspotInterface : "Personal Wi-Fi hotspot"
-            color: root.depsBlocked ? Color.urgent : Color.muted
+            color: root.depsBlocked ? Commons.Color.urgent : Commons.Color.muted
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -531,7 +522,7 @@ Panel {
           busy: root.busy
           enabled: !root.busy
           foreground: root.foreground
-          accent: Color.accent
+          accent: Commons.Color.accent
           onToggled: root.toggleHotspot()
         }
       }
@@ -544,8 +535,8 @@ Panel {
         width: parent.width
         height: installCardInner.implicitHeight + Style.space(24)
         radius: Style.cornerRadius
-        color: Color.background
-        border.color: Color.popups.border
+        color: Commons.Color.background
+        border.color: Commons.Color.popups.border
         border.width: Math.max(1, Style.space(1))
         visible: root.depsBlocked
 
@@ -577,7 +568,7 @@ Panel {
               Text {
                 width: Style.space(10)
                 text: "•"
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -596,7 +587,7 @@ Panel {
             width: parent.width
             visible: root.installCommand !== ""
             text: "Run this in a terminal, then reopen the panel:"
-            color: Color.muted
+            color: Commons.Color.muted
             wrapMode: Text.Wrap
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
@@ -606,8 +597,8 @@ Panel {
             width: parent.width
             height: Style.space(38)
             radius: Style.space(6)
-            color: Color.popups.background
-            border.color: root.installCopied ? Color.accent : Color.popups.border
+            color: Commons.Color.popups.background
+            border.color: root.installCopied ? Commons.Color.accent : Commons.Color.popups.border
             border.width: Math.max(1, Style.space(1))
 
             Text {
@@ -649,7 +640,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               width: parent.width - recheckButton.width - Style.space(8)
               text: "Installing the packages changes nothing here until you reload."
-              color: Color.muted
+              color: Commons.Color.muted
               wrapMode: Text.Wrap
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
@@ -672,7 +663,7 @@ Panel {
         Text {
           visible: root.hotspotActive && root.upstream !== "auto"
           text: "·  route " + root.upstream
-          color: Color.muted
+          color: Commons.Color.muted
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -684,8 +675,8 @@ Panel {
         width: parent.width
         height: Style.space(220)
         radius: Style.cornerRadius
-        color: Color.background
-        border.color: Color.popups.border
+        color: Commons.Color.background
+        border.color: Commons.Color.popups.border
         border.width: Math.max(1, Style.space(1))
 
         Rectangle {
@@ -721,7 +712,7 @@ Panel {
         Rectangle {
           anchors.fill: parent
           radius: parent.radius
-          color: Color.background
+          color: Commons.Color.background
           opacity: root.hotspotActive && root.qrReady ? 0 : 0.82
           Behavior on opacity { NumberAnimation { duration: 140 } }
         }
@@ -735,7 +726,7 @@ Panel {
               required property int index
               width: Style.space(10)
               height: width
-              color: (index * 17) % 5 < 2 ? Color.accent : Color.foreground
+              color: (index * 17) % 5 < 2 ? Commons.Color.accent : Commons.Color.foreground
             }
           }
         }
@@ -754,7 +745,7 @@ Panel {
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.hotspotActive ? "Preparing a scannable code" : "QR appears when Omaspot is active"
-            color: Color.muted
+            color: Commons.Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -765,7 +756,7 @@ Panel {
         visible: !root.depsBlocked && (root.errorMessage !== "" || root.statusError !== "")
         width: parent.width
         text: root.errorMessage !== "" ? root.errorMessage : root.statusError
-        color: Color.urgent
+        color: Commons.Color.urgent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.Wrap
@@ -793,7 +784,7 @@ Panel {
           width: parent.width
           visible: root.connectedDevices.length === 0
           text: "Nothing has joined yet"
-          color: Color.muted
+          color: Commons.Color.muted
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -828,7 +819,7 @@ Panel {
               Text {
                 width: Style.space(10)
                 text: modelData.connected ? "●" : "○"
-                color: modelData.connected ? root.statusColor : Color.muted
+                color: modelData.connected ? root.statusColor : Commons.Color.muted
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -838,7 +829,7 @@ Panel {
                   deviceRowInner.width - Style.space(10) - deviceRowInner.spacing
                   - deviceIp.width - Style.space(8))
                 text: modelData.name
-                color: modelData.connected ? root.foreground : Color.muted
+                color: modelData.connected ? root.foreground : Commons.Color.muted
                 elide: Text.ElideRight
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -847,7 +838,7 @@ Panel {
                 id: deviceIp
                 text: modelData.ip
                 visible: modelData.ip !== "*"
-                color: Color.muted
+                color: Commons.Color.muted
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -882,7 +873,7 @@ Panel {
         spacing: Style.space(6)
         Text {
           text: "Band"
-          color: Color.muted
+          color: Commons.Color.muted
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           anchors.verticalCenter: parent.verticalCenter
@@ -905,7 +896,7 @@ Panel {
         spacing: Style.space(6)
         Text {
           text: "Channel"
-          color: Color.muted
+          color: Commons.Color.muted
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           anchors.verticalCenter: parent.verticalCenter
@@ -939,7 +930,7 @@ Panel {
         Column {
           width: (parent.width - parent.spacing) / 2
           spacing: Style.space(4)
-          Text { text: "Hotspot name"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+          Text { text: "Hotspot name"; color: Commons.Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           TextField {
             id: ssidField
             enabled: root.opened
@@ -952,7 +943,7 @@ Panel {
         Column {
           width: (parent.width - parent.spacing) / 2
           spacing: Style.space(4)
-          Text { text: "Security key"; color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+          Text { text: "Security key"; color: Commons.Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           Row {
             width: parent.width
             spacing: Style.space(4)

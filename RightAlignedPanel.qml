@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 
 // Omaspot's bar item lives in the top bar's right section. The shared
 // KeyboardPanel centers top-bar cards under their trigger; this local variant
@@ -136,8 +137,8 @@ PanelWindow {
     y: root.cardOrigin.y
     width: root.contentWidth
     height: root.contentHeight
-    color: Color.popups.background
-    border.color: Color.popups.border
+    color: Commons.Color.popups.background
+    border.color: Commons.Color.popups.border
     border.width: Math.max(1, Style.space(2))
     property real padding: root.padding
     radius: Style.cornerRadius
