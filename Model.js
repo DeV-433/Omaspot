@@ -168,6 +168,20 @@ function validate(state) {
   return errors
 }
 
+// Apply a bounded insertion or deletion to a text input. Returning null means
+// the proposed edit is invalid, so callers can leave the field unchanged.
+function replaceTextRange(value, start, end, insertion, maxLength, digitsOnly) {
+  var current = String(value || "")
+  var added = String(insertion || "")
+  var first = Math.max(0, Math.min(current.length, Math.min(start, end)))
+  var last = Math.max(first, Math.min(current.length, Math.max(start, end)))
+  if (/[\u0000-\u001f\u007f]/.test(added)) return null
+
+  var next = current.slice(0, first) + added + current.slice(last)
+  if (next.length > maxLength || (digitsOnly && !/^\d*$/.test(next))) return null
+  return { text: next, cursor: first + added.length }
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     defaults: defaults,
@@ -179,6 +193,7 @@ if (typeof module !== "undefined") {
     parseAsciiQr: parseAsciiQr,
     validChannel: validChannel,
     validChannelForBand: validChannelForBand,
-    validate: validate
+    validate: validate,
+    replaceTextRange: replaceTextRange
   }
 }

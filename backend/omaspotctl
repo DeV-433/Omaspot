@@ -724,6 +724,7 @@ DEP_SPECS=(
   'stat|coreutils|blocking|yay -S --needed coreutils'
   'qrencode|qrencode|optional|yay -S --needed qrencode'
   'iw|iw|optional|yay -S --needed iw'
+  'wl-paste|wl-clipboard|optional|yay -S --needed wl-clipboard'
 )
 
 # Reports each dependency so the panel can explain a missing package instead of

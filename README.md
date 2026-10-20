@@ -35,6 +35,7 @@ same engine the `wihotspot` GUI uses, plus a few supporting commands:
 | `stat` | `coreutils` | instance state ownership checks | yes |
 | `qrencode` | `qrencode` | the QR image | only for the QR |
 | `iw` | `iw` | marking associated devices | only for those markers |
+| `wl-paste` | `wl-clipboard` | explicitly pasting into settings fields | only for clipboard paste |
 
 `create_ap` runs `hostapd` and `dnsmasq` as root and drives interfaces with
 `iproute2`; Omaspot also uses `ip` to choose the current default-route
@@ -59,11 +60,13 @@ markers — but a hotspot still starts in both cases, so neither hides the UI.
 If you would rather install everything up front:
 
 ```sh
-yay -S --needed linux-wifi-hotspot qrencode iw
+yay -S --needed linux-wifi-hotspot qrencode iw wl-clipboard
 ```
 
 `qrencode` and `iw` are dependencies of `linux-wifi-hotspot`, so naming them
 is only for clarity — `--needed` skips any that are already present.
+Install `wl-clipboard` if you want to paste clipboard text into the settings
+fields; keyboard typing works without it.
 NetworkManager and polkit are normally already present on Omarchy.
 
 To check the same state from a terminal:
@@ -121,6 +124,11 @@ The copy button uses `wl-copy` from `wl-clipboard`, quoted with
 checks the install command matches a plain `yay -S --needed <packages>` shape
 before offering it, so a malformed or spoofed backend response cannot put
 arbitrary text on the clipboard.
+
+The three settings inputs remain read-only to Qt's native clipboard watcher.
+Typing and selection are handled by Omaspot, and paste explicitly invokes
+`wl-paste` with a two-second timeout and a 256-byte output cap. Install
+`wl-clipboard` to enable paste with Ctrl+V or Shift+Insert.
 
 ## Defaults and settings
 

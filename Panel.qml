@@ -45,6 +45,12 @@ Panel {
   property var missingOptional: []
   property string installCommand: ""
   property bool installCopied: false
+  property var pasteJob: null
+  property var pasteTargetField: null
+  property string pasteSnapshot: ""
+  property int pasteSnapshotCursor: -1
+  property int pasteSnapshotSelectionStart: -1
+  property int pasteSnapshotSelectionEnd: -1
 
   readonly property string moduleId: "io.github.devanshu.omaspot"
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/settings"
@@ -69,6 +75,7 @@ Panel {
   }
 
   function close() {
+    cancelPendingPaste()
     root.controller.hide()
     passwordVisible = false
   }
@@ -321,6 +328,142 @@ Panel {
     saveState()
   }
 
+  function cancelPendingPaste() {
+    pasteTargetField = null
+    pasteSnapshot = ""
+    pasteSnapshotCursor = -1
+    pasteSnapshotSelectionStart = -1
+    pasteSnapshotSelectionEnd = -1
+  }
+
+  function replaceFieldText(field, start, end, insertion) {
+    if (!field || !root.opened || !root.settingsEditable) return false
+    var isChannel = field === channelField
+    var limit = isChannel ? 3 : field === ssidField ? 32 : 63
+    var result = Model.replaceTextRange(field.text, start, end, insertion, limit, isChannel)
+    if (result === null) return false
+
+    if (field === channelField) {
+      if (result.text !== field.text) root.setChannel(result.text)
+    } else if (field === ssidField) {
+      if (result.text !== field.text) root.setSsid(result.text)
+    } else if (field === passwordField) {
+      if (result.text !== field.text) root.setPassword(result.text)
+    } else return false
+
+    Qt.callLater(function() {
+      if (root.opened && root.settingsEditable && field.activeFocus && field.text === result.text) {
+        field.cursorPosition = result.cursor
+        field.deselect()
+      }
+    })
+    return true
+  }
+
+  function handleFieldKey(field, event) {
+    var shortcut = (event.modifiers & Qt.ControlModifier) !== 0
+    var altShortcut = (event.modifiers & Qt.AltModifier) !== 0
+    var metaShortcut = (event.modifiers & Qt.MetaModifier) !== 0
+    if (shortcut && !altShortcut && !metaShortcut && event.key === Qt.Key_V) {
+      root.beginPaste(field)
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_Insert && (event.modifiers & Qt.ShiftModifier) !== 0) {
+      root.beginPaste(field)
+      event.accepted = true
+      return
+    }
+    if (shortcut && !altShortcut && !metaShortcut && event.key === Qt.Key_A) {
+      field.selectAll()
+      event.accepted = true
+      return
+    }
+
+    var start = field.selectionStart
+    var end = field.selectionEnd
+    if (start < 0 || end < 0 || start === end) start = end = field.cursorPosition
+    else if (start > end) { var swap = start; start = end; end = swap }
+
+    if (event.key === Qt.Key_Backspace) {
+      if (start === end && start > 0) {
+        start--
+        if (start > 0 && field.text.charCodeAt(start) >= 0xdc00 && field.text.charCodeAt(start) <= 0xdfff
+            && field.text.charCodeAt(start - 1) >= 0xd800 && field.text.charCodeAt(start - 1) <= 0xdbff)
+          start--
+      }
+      root.replaceFieldText(field, start, end, "")
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_Delete) {
+      if (start === end && end < field.text.length) {
+        end++
+        if (end < field.text.length && field.text.charCodeAt(end - 1) >= 0xd800 && field.text.charCodeAt(end - 1) <= 0xdbff
+            && field.text.charCodeAt(end) >= 0xdc00 && field.text.charCodeAt(end) <= 0xdfff)
+          end++
+      }
+      root.replaceFieldText(field, start, end, "")
+      event.accepted = true
+      return
+    }
+
+    var shortcutModifiers = event.modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.AltModifier)
+    var altGr = shortcutModifiers === (Qt.ControlModifier | Qt.AltModifier)
+    var printableModifiers = shortcutModifiers === 0 || altGr
+    if (printableModifiers && event.text !== "" && !/[\u0000-\u001f\u007f]/.test(event.text)) {
+      root.replaceFieldText(field, start, end, event.text)
+      event.accepted = true
+    }
+  }
+
+  function beginPaste(field) {
+    if (!root.opened || !root.settingsEditable || root.pasteJob) return
+    var job = pasteJobComponent.createObject(root)
+    if (!job) {
+      root.showError("Could not start bounded clipboard paste")
+      return
+    }
+
+    pasteTargetField = field
+    pasteSnapshot = field.text
+    pasteSnapshotCursor = field.cursorPosition
+    pasteSnapshotSelectionStart = field.selectionStart
+    pasteSnapshotSelectionEnd = field.selectionEnd
+    pasteJob = job
+    job.running = true
+  }
+
+  function completePaste(job, exitCode, clipboardText) {
+    if (job !== root.pasteJob) {
+      Qt.callLater(function() { job.destroy() })
+      return
+    }
+
+    var field = pasteTargetField
+    var current = field && root.opened && root.settingsEditable && field.activeFocus
+      && field.text === pasteSnapshot && field.cursorPosition === pasteSnapshotCursor
+      && field.selectionStart === pasteSnapshotSelectionStart
+      && field.selectionEnd === pasteSnapshotSelectionEnd
+
+    root.pasteJob = null
+    root.cancelPendingPaste()
+
+    if (current && exitCode !== 0) {
+      root.showError("Paste failed, timed out, exceeded the size limit, or wl-clipboard is unavailable")
+    } else if (current && clipboardText.length >= 256) {
+      root.showError("Clipboard text is too large for this field")
+    } else if (current && clipboardText !== "") {
+      var start = field.selectionStart
+      var end = field.selectionEnd
+      if (start < 0 || end < 0 || start === end) start = end = field.cursorPosition
+      if (!root.replaceFieldText(field, start, end, clipboardText))
+        root.showError("Clipboard text is too long or invalid for this field")
+    }
+
+    Qt.callLater(function() { job.destroy() })
+  }
+
   FileView {
     id: stateFile
     path: root.statePath
@@ -445,6 +588,36 @@ Panel {
   }
 
   Process { id: notifyProc }
+
+  // This process exists only during an explicit paste. Its bounded output is
+  // discarded with the process object as soon as the paste finishes.
+  Component {
+    id: pasteJobComponent
+    Process {
+      id: pasteJobInstance
+      property bool pasteOutputReady: false
+      property bool pasteExitReady: false
+      property int pasteExitCode: -1
+      command: ["bash", "-c", "set -o pipefail; timeout --kill-after=1s 2s wl-paste --no-newline | head -c 256"]
+      stdout: StdioCollector {
+        id: pasteOutput
+        waitForEnd: true
+        onStreamFinished: {
+          pasteJobInstance.pasteOutputReady = true
+          pasteJobInstance.completeWhenReady()
+        }
+      }
+      function completeWhenReady() {
+        if (pasteOutputReady && pasteExitReady)
+          root.completePaste(pasteJobInstance, pasteExitCode, pasteOutput.text)
+      }
+      onExited: function(code, exitStatus) {
+        pasteJobInstance.pasteExitCode = code
+        pasteJobInstance.pasteExitReady = true
+        pasteJobInstance.completeWhenReady()
+      }
+    }
+  }
 
   Timer {
     id: statusTimer
@@ -955,12 +1128,13 @@ Panel {
         TextField {
           id: channelField
           enabled: root.opened && root.settingsEditable
+          readOnly: true
           visible: root.channelMode === "manual"
           width: Style.space(74)
           text: root.channel
           placeholderText: root.band === "5" ? "149" : "1"
           validator: IntValidator { bottom: 1; top: 165 }
-          onTextChanged: if (activeFocus) root.setChannel(text)
+          Keys.onPressed: function(event) { root.handleFieldKey(channelField, event) }
         }
       }
 
@@ -975,10 +1149,11 @@ Panel {
           TextField {
             id: ssidField
             enabled: root.opened && root.settingsEditable
+            readOnly: true
             width: parent.width
             text: root.ssid
             placeholderText: "Omaspot"
-            onTextChanged: if (activeFocus) root.setSsid(text)
+            Keys.onPressed: function(event) { root.handleFieldKey(ssidField, event) }
           }
         }
         Column {
@@ -991,11 +1166,12 @@ Panel {
             TextField {
               id: passwordField
               enabled: root.opened && root.settingsEditable
+              readOnly: true
               width: parent.width - showPassword.width - parent.spacing
               text: root.password
               password: !root.passwordVisible
               placeholderText: "8+ characters"
-              onTextChanged: if (activeFocus) root.setPassword(text)
+              Keys.onPressed: function(event) { root.handleFieldKey(passwordField, event) }
             }
             Button {
               id: showPassword
