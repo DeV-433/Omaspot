@@ -5,7 +5,6 @@ import QtQuick
 // TextField and ToggleSwitch still resolve to the Omarchy widgets rather than
 // the Controls ones.
 import QtQuick.Controls
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Ui
@@ -39,10 +38,8 @@ Panel {
   property bool passwordVisible: false
   property bool startPending: false
   property var connectedDevices: []
-  // Dependency report. `depsBlocked` hides the hotspot controls entirely until
-  // the packages that make a hotspot possible are installed.
+  // `depsBlocked` hides the hotspot controls until create_ap is installed.
   property var missingBlocking: []
-  property var missingOptional: []
   property string installCommand: ""
   property bool installCopied: false
   property var pasteJob: null
@@ -64,7 +61,6 @@ Panel {
     : status === "starting" ? "Starting…"
     : status === "stopping" ? "Stopping…" : "Inactive"
   readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
-  readonly property color surface: Commons.Color.popups.background
   readonly property color statusColor: status === "active" ? Commons.Color.accent
     : (status === "starting" || status === "stopping") ? Commons.Color.accent
     : statusError !== "" || errorMessage !== "" ? Commons.Color.urgent : Commons.Color.muted
@@ -100,7 +96,7 @@ Panel {
       upstreamOptions = [{ value: "auto", label: "Auto-detect" }, { value: upstream, label: upstream + " · saved" }]
   }
 
-  function saveState(lastState) {
+  function saveState() {
     if (!settingsLoaded) return
     var state = {
       ssid: ssid,
@@ -108,8 +104,7 @@ Panel {
       band: band,
       channelMode: channelMode,
       channel: channel,
-      upstream: upstream,
-      lastState: lastState || (hotspotActive ? "active" : "inactive")
+      upstream: upstream
     }
     stateFile.setText(JSON.stringify(state, null, 2) + "\n")
   }
@@ -137,7 +132,7 @@ Panel {
   }
 
   // Dependency check. Runs on every open so returning from a terminal after
-  // installing the packages immediately reveals the working UI again.
+  // installing the package immediately reveals the working UI again.
   function refreshDependencies() {
     if (!dependencyProc.running) dependencyProc.running = true
   }
@@ -146,7 +141,6 @@ Panel {
     var report = Model.parseDoctor(raw)
     var wasBlocked = root.depsBlocked
     missingBlocking = report.blocking
-    missingOptional = report.optional
     installCommand = report.install
     // Refresh the rest of the panel once, the moment the gate opens. Deliberately
     // not refreshAll(): that would re-run this same dependency check.
@@ -193,7 +187,7 @@ Panel {
     if (result.upstream !== "" && upstream === "auto") upstream = result.upstream
     if (previous !== status && status === "active") {
       startPending = false
-      saveState("active")
+      saveState()
       scheduleQr()
       refreshClients()
     }
@@ -201,7 +195,7 @@ Panel {
       startPending = false
       if (errorMessage === "" && statusError === "")
         showError("Hotspot stopped")
-      saveState("inactive")
+      saveState()
       qrReady = false
       qrRows = []
       qrSize = 0
@@ -210,7 +204,7 @@ Panel {
     if (status === "inactive" && (previous === "stopping" || previous === "starting")) {
       if (previous === "starting" && errorMessage === "" && statusError === "")
         showError("The hotspot exited before becoming active")
-      saveState("inactive")
+      saveState()
     }
     if (status !== "active" && connectedDevices.length > 0) connectedDevices = []
   }
@@ -245,7 +239,7 @@ Panel {
     clearError()
     status = "starting"
     startPending = true
-    saveState("active")
+    saveState()
     startProc.command = [backendPath, "start", hotspotInterfaceForStart(), selectedUpstream, band, channelMode, channel]
     startProc.running = true
   }
@@ -259,7 +253,7 @@ Panel {
   function stopHotspot() {
     clearError()
     status = "stopping"
-    saveState("inactive")
+    saveState()
     // The backend knows the running create_ap pid, so "auto" still stops a
     // hotspot that was started outside the panel (e.g. from the GUI).
     stopProc.command = [backendPath, "stop", hotspotInterface !== "" ? hotspotInterface : "auto"]
@@ -620,7 +614,6 @@ Panel {
   }
 
   Timer {
-    id: statusTimer
     interval: 3000
     repeat: true
     running: true
@@ -668,7 +661,6 @@ Panel {
     owner: root.hostWidget || root
     bar: root.bar
     open: root.opened
-    alignEnd: true
     focusTarget: keyCatcher
     // Match the built-in network panel's 380px fitted width.
     contentWidth: panel.fittedContentWidth(Style.space(380))
@@ -728,7 +720,6 @@ Panel {
       // Everything here is backend-provided text; the copy button is the only action
       // so a first-run user cannot start a half-working configuration.
       Rectangle {
-        id: installCard
         width: parent.width
         height: installCardInner.implicitHeight + Style.space(24)
         radius: Style.cornerRadius
@@ -747,7 +738,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: "Omaspot needs these packages before it can share a hotspot:"
+            text: "Install the required package to enable the hotspot:"
             color: root.foreground
             wrapMode: Text.Wrap
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -783,7 +774,7 @@ Panel {
           Text {
             width: parent.width
             visible: root.installCommand !== ""
-            text: "Run this in a terminal, then reopen the panel:"
+            text: "Run this in a terminal, then select Re-check:"
             color: Commons.Color.muted
             wrapMode: Text.Wrap
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -836,7 +827,7 @@ Panel {
             Text {
               anchors.verticalCenter: parent.verticalCenter
               width: parent.width - recheckButton.width - Style.space(8)
-              text: "Installing the packages changes nothing here until you reload."
+              text: "After installing, select Re-check to continue."
               color: Commons.Color.muted
               wrapMode: Text.Wrap
               font.family: Style.font.family
@@ -868,7 +859,6 @@ Panel {
 
       Rectangle {
         visible: !root.depsBlocked
-        id: qrCard
         width: parent.width
         height: Style.space(220)
         radius: Style.cornerRadius
@@ -964,7 +954,6 @@ Panel {
       // hotspot cannot push the settings below it off screen. ListView contributes
       // no implicitHeight, which is what keeps the card the same size as before.
       Column {
-        id: devicesColumn
         width: parent.width
         spacing: Style.space(4)
         visible: !root.depsBlocked && root.hotspotActive
@@ -987,7 +976,6 @@ Panel {
         }
 
         ListView {
-          id: deviceList
           visible: root.connectedDevices.length > 0
           width: parent.width
           height: Math.min(contentHeight, Style.space(120))
@@ -1003,7 +991,6 @@ Panel {
           model: root.connectedDevices
 
           delegate: Item {
-            id: deviceRow
             required property var modelData
             width: ListView.view.width
             height: deviceRowInner.implicitHeight

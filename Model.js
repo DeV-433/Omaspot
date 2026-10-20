@@ -8,8 +8,7 @@ function defaults() {
     band: "2.4",
     channelMode: "auto",
     channel: "1",
-    upstream: "auto",
-    lastState: "inactive"
+    upstream: "auto"
   }
 }
 
@@ -19,7 +18,7 @@ function parseState(raw) {
 
   try {
     var value = JSON.parse(String(raw)) || {}
-    var keys = ["ssid", "password", "band", "channelMode", "channel", "upstream", "lastState"]
+    var keys = ["ssid", "password", "band", "channelMode", "channel", "upstream"]
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i]
       if (value[key] !== undefined && value[key] !== null)
@@ -41,7 +40,6 @@ function parseStatus(raw) {
   return {
     state: fields[0] === "active" ? "active" : "inactive",
     hotspotInterface: fields[1] || "",
-    pid: fields[2] || "",
     upstream: fields[3] || ""
   }
 }
@@ -116,14 +114,12 @@ function parseClients(raw) {
 
 // Dependency report from `omaspotctl doctor`.
 //
-// Per dependency line: state <TAB> command <TAB> package <TAB> level, where
-// state is ok|missing and level is blocking|optional. A final
-// `install <TAB> <command>` line appears only when something blocking is
-// absent. Only missing entries are returned; `blocking` is what gates the UI.
+// Per dependency line: state <TAB> command <TAB> package <TAB> level.
+// The current doctor reports the blocking create_ap dependency and emits a
+// validated install command only when it is missing.
 function parseDoctor(raw) {
   var lines = String(raw || "").replace(/\r/g, "").split("\n")
   var blocking = []
-  var optional = []
   var install = ""
   for (var i = 0; i < lines.length; i++) {
     if (lines[i].trim() === "") continue
@@ -136,14 +132,13 @@ function parseDoctor(raw) {
       if (/^yay -S --needed( [A-Za-z0-9._+-]+)+$/.test(candidate)) install = candidate
       continue
     }
-    if (fields.length < 4 || fields[0] !== "missing") continue
+    if (fields.length < 4 || fields[0] !== "missing" || fields[3] !== "blocking") continue
     var pkg = String(fields[2] || "").trim()
     if (!/^[A-Za-z0-9._+-]+$/.test(pkg)) continue
     var entry = { command: String(fields[1] || "").trim(), package: pkg }
-    if (fields[3] === "optional") optional.push(entry)
-    else blocking.push(entry)
+    blocking.push(entry)
   }
-  return { blocking: blocking, optional: optional, install: install }
+  return { blocking: blocking, install: install }
 }
 
 function validChannelForBand(band, value) {
@@ -151,10 +146,6 @@ function validChannelForBand(band, value) {
   if (band === "2.4") return /^(1|2|3|4|5|6|7|8|9|10|11|12|13)$/.test(channel)
   if (band === "5") return /^(36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165)$/.test(channel)
   return false
-}
-
-function validChannel(value) {
-  return validChannelForBand("2.4", value) || validChannelForBand("5", value)
 }
 
 function validate(state) {
@@ -191,7 +182,6 @@ if (typeof module !== "undefined") {
     parseClients: parseClients,
     parseDoctor: parseDoctor,
     parseAsciiQr: parseAsciiQr,
-    validChannel: validChannel,
     validChannelForBand: validChannelForBand,
     validate: validate,
     replaceTextRange: replaceTextRange

@@ -707,32 +707,18 @@ deps() {
   [ "$found" -eq 1 ]
 }
 
-# Single source of truth for what the plugin needs, as
-# command|package|blocking|install command.
-#
-# `blocking` means the panel cannot offer a working hotspot without it and
-# should tell the user what to install. `optional` means only one feature
-# degrades: without qrencode there is no QR image, without iw the device list
-# falls back to DHCP leases and nothing is marked as currently associated.
-# stat is blocking because every instance-state read inspects ownership and
-# mode with it.
+# On a standard Omarchy installation, this is the one package the user needs
+# to add for Omaspot. Omarchy supplies the supporting tools and utilities.
+# Format: command|package|level|install command.
 DEP_SPECS=(
   'create_ap|linux-wifi-hotspot|blocking|yay -S --needed linux-wifi-hotspot'
-  'pkexec|polkit|blocking|yay -S --needed polkit'
-  'nmcli|networkmanager|blocking|yay -S --needed networkmanager'
-  'ip|iproute2|blocking|yay -S --needed iproute2'
-  'stat|coreutils|blocking|yay -S --needed coreutils'
-  'qrencode|qrencode|optional|yay -S --needed qrencode'
-  'iw|iw|optional|yay -S --needed iw'
-  'wl-paste|wl-clipboard|optional|yay -S --needed wl-clipboard'
 )
 
-# Reports each dependency so the panel can explain a missing package instead of
-# failing opaquely. Emits one line per entry as
-#   ok|missing <TAB> command <TAB> package <TAB> blocking|optional
-# followed by a single install line when something blocking is absent, so the
-# copyable command is composed here rather than in QML:
-#   install <TAB> yay -S --needed pkg pkg
+# Reports whether the hotspot backend is available and supplies its install
+# command when missing. The standard Omarchy tools are not separate install
+# prompts. Output:
+#   ok|missing <TAB> create_ap <TAB> linux-wifi-hotspot <TAB> blocking
+#   install <TAB> yay -S --needed linux-wifi-hotspot
 doctor() {
   local spec cmd package level install present
   local -a absent=()

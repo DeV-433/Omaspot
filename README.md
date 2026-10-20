@@ -18,56 +18,33 @@ Features:
 - Automatic or manual channel selection
 - Persistent per-user settings stored outside the plugin checkout
 - Credentials sent over stdin instead of command-line arguments
-- Checks its own dependencies and offers the install command when one is missing
+- Checks whether the hotspot backend is installed and offers its install
+  command when missing
 
 ## Requirements
 
-Omaspot drives `create_ap` from
-[linux-wifi-hotspot](https://github.com/lakinduakash/linux-wifi-hotspot), the
-same engine the `wihotspot` GUI uses, plus a few supporting commands:
+On a standard Omarchy installation, the only additional package Omaspot asks
+you to install is
+[linux-wifi-hotspot](https://github.com/lakinduakash/linux-wifi-hotspot),
+which provides `create_ap`, the same hotspot engine used by the `wihotspot`
+GUI. Install it with:
 
-| Command | Package | Used for | Required |
-| --- | --- | --- | --- |
-| `create_ap` | `linux-wifi-hotspot` | the hotspot itself | yes |
-| `pkexec` | `polkit` | running `create_ap` as root | yes |
-| `nmcli` | `networkmanager` | interface discovery | yes |
-| `ip` | `iproute2` | detecting the active upstream route | yes |
-| `stat` | `coreutils` | instance state ownership checks | yes |
-| `qrencode` | `qrencode` | the QR image | only for the QR |
-| `iw` | `iw` | marking associated devices | only for those markers |
-| `wl-paste` | `wl-clipboard` | explicitly pasting into settings fields | only for clipboard paste |
+```sh
+yay -S --needed linux-wifi-hotspot
+```
 
-`create_ap` runs `hostapd` and `dnsmasq` as root and drives interfaces with
-`iproute2`; Omaspot also uses `ip` to choose the current default-route
-interface when upstream is set to Auto.
+Omarchy already supplies the supporting system tools, QR encoder, and
+`wl-clipboard` used for clipboard copy and paste. The package manager resolves
+the hotspot package's own dependencies during installation.
 
 Omaspot enables 802.11n on both bands and requests 802.11ac with an 80 MHz
 channel width on 5 GHz. The adapter, connected Wi-Fi channel, and regulatory
 domain may limit the negotiated mode or width.
 
-### You do not have to install these first
-
-There is no prerequisite step. The first time you open the panel it checks
-everything above, and if something required is missing it replaces the hotspot
-controls with the list of missing packages and a ready-to-run `yay` command
-with a **Copy** button. Run that command in a terminal, reopen the panel, and
-it carries on as normal. See [First run](#first-run).
-
-Only a genuinely required package replaces the controls. Without `qrencode`
-you lose the QR image, and without `iw` you lose the currently-associated
-markers — but a hotspot still starts in both cases, so neither hides the UI.
-
-If you would rather install everything up front:
-
-```sh
-yay -S --needed linux-wifi-hotspot qrencode iw wl-clipboard
-```
-
-`qrencode` and `iw` are dependencies of `linux-wifi-hotspot`, so naming them
-is only for clarity — `--needed` skips any that are already present.
-Install `wl-clipboard` if you want to paste clipboard text into the settings
-fields; keyboard typing works without it.
-NetworkManager and polkit are normally already present on Omarchy.
+When the panel opens, it checks for `create_ap`. If it is missing, the hotspot
+controls are replaced with the `linux-wifi-hotspot` install command. Run it in
+a terminal, reopen the panel, and Omaspot continues as normal. See
+[First run](#first-run).
 
 To check the same state from a terminal:
 
@@ -102,9 +79,9 @@ omarchy plugin enable io.github.devanshu.omaspot
 Omaspot runs as plugin code inside the long-lived Omarchy shell process. Review
 the repository before installing plugins from any source you do not trust.
 
-Installing the plugin is the only setup step. Click the bar icon afterwards:
-if a required package is missing, the panel tells you which one and hands you
-the command to run — see [First run](#first-run).
+After installing the plugin, click the bar icon. If the `linux-wifi-hotspot`
+package is missing, the panel offers its install command — see
+[First run](#first-run).
 
 ## First run
 
@@ -114,10 +91,9 @@ restart to perform. The toggle is hidden while the gate is up, and a start is
 refused outright, so a hotspot can never be launched without `create_ap`
 behind it.
 
-The check comes from `omaspotctl doctor`, which reports each dependency as
-`ok` or `missing` and labels it `blocking` or `optional`; it also composes the
-`yay` command, so the copyable string is built in one place instead of being
-assembled in QML.
+The check comes from `omaspotctl doctor`. It checks for `create_ap` and, if
+missing, returns the single `linux-wifi-hotspot` install command. The copyable
+command is composed in the backend rather than assembled in QML.
 
 The copy button uses `wl-copy` from `wl-clipboard`, quoted with
 `Util.shellQuote` so the command reaches it as a single argument. Omaspot
@@ -127,8 +103,9 @@ arbitrary text on the clipboard.
 
 The three settings inputs remain read-only to Qt's native clipboard watcher.
 Typing and selection are handled by Omaspot, and paste explicitly invokes
-`wl-paste` with a two-second timeout and a 256-byte output cap. Install
-`wl-clipboard` to enable paste with Ctrl+V or Shift+Insert.
+`wl-paste` with a two-second timeout and a 256-byte output cap. Standard
+Omarchy installations include `wl-clipboard`, which provides Ctrl+V and
+Shift+Insert paste support.
 
 ## Defaults and settings
 

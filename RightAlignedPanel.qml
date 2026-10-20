@@ -19,12 +19,8 @@ PanelWindow {
   property int contentWidth: Style.space(280)
   property int contentHeight: Style.space(200)
   property bool open: false
-  // Kept as a compatibility property for Panel.qml; this component is
-  // intentionally end-aligned whenever the bar is horizontal.
-  property bool alignEnd: true
   property int gap: Style.gapsOut
   property bool popoutSwitching: false
-  property bool popoutSwitchClosing: false
   property bool focusPrimed: false
   property Item focusTarget: null
 
