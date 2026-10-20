@@ -52,6 +52,7 @@ Panel {
   readonly property string backendPath: String(Qt.resolvedUrl("backend/omaspotctl")).replace(/^file:\/\//, "")
   readonly property bool busy: status === "starting" || status === "stopping"
   readonly property bool hotspotActive: status === "active"
+  readonly property bool settingsEditable: !hotspotActive && !busy
   readonly property bool depsBlocked: missingBlocking.length > 0
   readonly property string statusLabel: status === "active" ? "Active"
     : status === "starting" ? "Starting…"
@@ -185,14 +186,12 @@ Panel {
     if (result.upstream !== "" && upstream === "auto") upstream = result.upstream
     if (previous !== status && status === "active") {
       startPending = false
-      startSettleTimer.stop()
       saveState("active")
       scheduleQr()
       refreshClients()
     }
     if (status === "inactive" && previous === "active") {
       startPending = false
-      startSettleTimer.stop()
       if (errorMessage === "" && statusError === "")
         showError("Hotspot stopped")
       saveState("inactive")
@@ -239,7 +238,6 @@ Panel {
     clearError()
     status = "starting"
     startPending = true
-    startSettleTimer.restart()
     saveState("active")
     startProc.command = [backendPath, "start", hotspotInterfaceForStart(), selectedUpstream, band, channelMode, channel]
     startProc.running = true
@@ -288,22 +286,40 @@ Panel {
   }
 
   function setUpstream(value) {
+    if (!settingsEditable) return
     upstream = value
     saveState()
   }
 
   function setBand(value) {
+    if (!settingsEditable) return
     band = value
-    if (band === "5" && channel === "1") channel = "149"
-    if (band === "2.4" && channel === "149") channel = "1"
+    if (!Model.validChannelForBand(band, channel))
+      channel = band === "5" ? "149" : "1"
     saveState()
     scheduleQr()
   }
 
-  function setChannelMode(value) { channelMode = value; saveState() }
-  function setChannel(value) { channel = value; saveState() }
-  function setSsid(value) { ssid = value; saveState(); scheduleQr() }
-  function setPassword(value) { password = value; saveState(); scheduleQr() }
+  function setChannelMode(value) {
+    if (!settingsEditable) return
+    channelMode = value
+    saveState()
+  }
+  function setChannel(value) {
+    if (!settingsEditable) return
+    channel = value
+    saveState()
+  }
+  function setSsid(value) {
+    if (!settingsEditable) return
+    ssid = value
+    saveState()
+  }
+  function setPassword(value) {
+    if (!settingsEditable) return
+    password = value
+    saveState()
+  }
 
   FileView {
     id: stateFile
@@ -311,14 +327,27 @@ Panel {
     watchChanges: false
     atomicWrites: true
     printErrors: false
-    onLoaded: root.loadState(text())
+    onLoaded: {
+      root.loadState(text())
+      secureStatePermissionTimer.restart()
+    }
     onLoadFailed: root.loadState("")
+    onSaved: secureStatePermissionTimer.restart()
   }
 
   Process {
     id: ensureStateDir
     command: ["mkdir", "-p", root.stateDir]
     onExited: stateFile.reload()
+  }
+
+  Process {
+    id: secureStateFile
+    command: ["chmod", "0600", root.statePath]
+    onExited: function(code) {
+      if (code !== 0 && root.settingsLoaded)
+        root.showError("Could not restrict access to Omaspot settings")
+    }
   }
 
   Process {
@@ -370,12 +399,14 @@ Panel {
     onExited: function(code) {
       if (code !== 0) {
         root.startPending = false
-        startSettleTimer.stop()
         root.status = "inactive"
         root.showError(root.errorMessage || (code === 126 ? "Polkit authorization was cancelled" : "Could not start the hotspot"))
+      } else if (root.startPending) {
+        root.startPending = false
+        root.status = "inactive"
+        root.showError("The hotspot exited before becoming active")
       }
-      if (code === 0) startSettleTimer.restart()
-      else root.refreshStatus()
+      root.refreshStatus()
     }
   }
 
@@ -423,8 +454,6 @@ Panel {
     onTriggered: {
       var now = (new Date()).getTime()
       if (root.lastStatusTickMs > 0 && now - root.lastStatusTickMs > 8000) {
-        root.startPending = false
-        root.startSettleTimer.stop()
         root.refreshAll()
       }
       root.lastStatusTickMs = now
@@ -439,18 +468,13 @@ Panel {
     running: root.hotspotActive
     onTriggered: root.refreshClients()
   }
-  Timer {
-    id: startSettleTimer
-    // create_ap startup (virtual interface, channel scan, hostapd) takes a
-    // few seconds; keep polling suppressed until it settles or fails.
-    interval: 12000
-    repeat: false
-    onTriggered: {
-      root.startPending = false
-      root.refreshStatus()
-    }
-  }
   Timer { id: qrTimer; interval: 220; repeat: false; onTriggered: root.generateQr() }
+  Timer {
+    id: secureStatePermissionTimer
+    interval: 50
+    repeat: false
+    onTriggered: if (!secureStateFile.running) secureStateFile.running = true
+  }
   Timer { id: copiedTimer; interval: 1800; repeat: false; onTriggered: root.installCopied = false }
   Timer { id: errorTimer; interval: 8000; repeat: false; onTriggered: root.clearError() }
 
@@ -856,9 +880,22 @@ Panel {
         font.bold: true
       }
 
+      Text {
+        visible: !root.depsBlocked && !root.settingsEditable
+        width: parent.width
+        text: root.hotspotActive
+          ? "Stop the hotspot to change network settings"
+          : "Wait for the hotspot operation to finish before changing settings"
+        color: Commons.Color.muted
+        wrapMode: Text.Wrap
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+      }
+
       Dropdown {
         visible: !root.depsBlocked
         id: upstreamDropdown
+        enabled: root.opened && root.settingsEditable
         width: parent.width
         label: "Upstream interface"
         value: root.upstream
@@ -880,11 +917,13 @@ Panel {
         }
         Button {
           text: "2.4 GHz"
+          enabled: root.opened && root.settingsEditable
           selected: root.band === "2.4"
           onClicked: root.setBand("2.4")
         }
         Button {
           text: "5 GHz"
+          enabled: root.opened && root.settingsEditable
           selected: root.band === "5"
           onClicked: root.setBand("5")
         }
@@ -903,17 +942,19 @@ Panel {
         }
         Button {
           text: "Auto"
+          enabled: root.opened && root.settingsEditable
           selected: root.channelMode === "auto"
           onClicked: root.setChannelMode("auto")
         }
         Button {
           text: "Manual"
+          enabled: root.opened && root.settingsEditable
           selected: root.channelMode === "manual"
           onClicked: root.setChannelMode("manual")
         }
         TextField {
           id: channelField
-          enabled: root.opened
+          enabled: root.opened && root.settingsEditable
           visible: root.channelMode === "manual"
           width: Style.space(74)
           text: root.channel
@@ -933,7 +974,7 @@ Panel {
           Text { text: "Hotspot name"; color: Commons.Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           TextField {
             id: ssidField
-            enabled: root.opened
+            enabled: root.opened && root.settingsEditable
             width: parent.width
             text: root.ssid
             placeholderText: "Omaspot"
@@ -949,7 +990,7 @@ Panel {
             spacing: Style.space(4)
             TextField {
               id: passwordField
-              enabled: root.opened
+              enabled: root.opened && root.settingsEditable
               width: parent.width - showPassword.width - parent.spacing
               text: root.password
               password: !root.passwordVisible

@@ -146,8 +146,15 @@ function parseDoctor(raw) {
   return { blocking: blocking, optional: optional, install: install }
 }
 
+function validChannelForBand(band, value) {
+  var channel = String(value)
+  if (band === "2.4") return /^(1|2|3|4|5|6|7|8|9|10|11|12|13)$/.test(channel)
+  if (band === "5") return /^(36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165)$/.test(channel)
+  return false
+}
+
 function validChannel(value) {
-  return /^(1|2|3|4|5|6|7|8|9|10|11|12|13|14|36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165)$/.test(String(value))
+  return validChannelForBand("2.4", value) || validChannelForBand("5", value)
 }
 
 function validate(state) {
@@ -156,8 +163,8 @@ function validate(state) {
     errors.push("Hotspot name must be 1–32 characters")
   if (!state.password || state.password.length < 8 || state.password.length > 63)
     errors.push("Security key must be 8–63 characters")
-  if (state.channelMode === "manual" && !validChannel(state.channel))
-    errors.push("Choose a valid Wi-Fi channel")
+  if (state.channelMode === "manual" && !validChannelForBand(state.band, state.channel))
+    errors.push("Choose a valid Wi-Fi channel for the selected band")
   return errors
 }
 
@@ -171,6 +178,7 @@ if (typeof module !== "undefined") {
     parseDoctor: parseDoctor,
     parseAsciiQr: parseAsciiQr,
     validChannel: validChannel,
+    validChannelForBand: validChannelForBand,
     validate: validate
   }
 }

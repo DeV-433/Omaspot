@@ -31,12 +31,18 @@ same engine the `wihotspot` GUI uses, plus a few supporting commands:
 | `create_ap` | `linux-wifi-hotspot` | the hotspot itself | yes |
 | `pkexec` | `polkit` | running `create_ap` as root | yes |
 | `nmcli` | `networkmanager` | interface discovery | yes |
+| `ip` | `iproute2` | detecting the active upstream route | yes |
 | `stat` | `coreutils` | instance state ownership checks | yes |
 | `qrencode` | `qrencode` | the QR image | only for the QR |
 | `iw` | `iw` | marking associated devices | only for those markers |
 
 `create_ap` runs `hostapd` and `dnsmasq` as root and drives interfaces with
-`iproute2`; those arrive as dependencies of `linux-wifi-hotspot`.
+`iproute2`; Omaspot also uses `ip` to choose the current default-route
+interface when upstream is set to Auto.
+
+Omaspot enables 802.11n on both bands and requests 802.11ac with an 80 MHz
+channel width on 5 GHz. The adapter, connected Wi-Fi channel, and regulatory
+domain may limit the negotiated mode or width.
 
 ### You do not have to install these first
 

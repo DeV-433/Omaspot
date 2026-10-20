@@ -86,6 +86,22 @@ valid_iface() {
   esac
 }
 
+auto_upstream_interface() {
+  local iface
+  iface="$(ip -o route get 1.1.1.1 2>/dev/null \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')" || return 1
+  valid_iface "$iface" || return 1
+  printf '%s' "$iface"
+}
+
+valid_channel_for_band() {
+  case "$1:$2" in
+    2.4:1|2.4:2|2.4:3|2.4:4|2.4:5|2.4:6|2.4:7|2.4:8|2.4:9|2.4:10|2.4:11|2.4:12|2.4:13) return 0 ;;
+    5:36|5:40|5:44|5:48|5:52|5:56|5:60|5:64|5:100|5:104|5:108|5:112|5:116|5:120|5:124|5:128|5:132|5:136|5:140|5:144|5:149|5:153|5:157|5:161|5:165) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # First line only, trimmed. These files are attacker-reachable in general, so
 # never hand a whole file to a command.
 read_state_line() {
@@ -207,8 +223,10 @@ pid_is_create_ap() {
 # exec.path == /usr/bin/create_ap exactly, so a root wrapper that sanitized the
 # directory first would lose the action and prompt on every toggle.
 common_conf_dir_safe() {
-  [ -e "$COMMON_CONF_DIR" ] || return 0
+  # -e follows symlinks, so also treat a dangling symlink as an existing path.
+  [ -e "$COMMON_CONF_DIR" ] || [ -L "$COMMON_CONF_DIR" ] || return 0
   [ -d "$COMMON_CONF_DIR" ] || return 1
+  is_symlink "$COMMON_CONF_DIR" && return 1
   root_owned_unwritable "$COMMON_CONF_DIR"
 }
 
@@ -222,8 +240,12 @@ Clear it with: sudo rm -rf $COMMON_CONF_DIR"
 }
 
 secure_run_dir() {
+  [ ! -L "$RUN_DIR" ] || return 1
   mkdir -p "$RUN_DIR" 2>/dev/null || return 1
-  chmod 0700 "$RUN_DIR" 2>/dev/null || true
+  [ -d "$RUN_DIR" ] && [ ! -L "$RUN_DIR" ] || return 1
+  [ "$(stat -c '%u' -- "$RUN_DIR" 2>/dev/null)" = "$(id -u)" ] || return 1
+  chmod 0700 "$RUN_DIR" 2>/dev/null || return 1
+  ! group_or_world_writable "$RUN_DIR"
 }
 
 record_field() {
@@ -351,12 +373,13 @@ status() {
 
 start_create_ap() {
   need nmcli
+  need ip
   local wifi="$1"
   local upstream="$2"
   local band="$3"
   local channel_mode="$4"
   local channel="$5"
-  local ssid password
+  local ssid password config_file=''
 
   IFS= read -r ssid || true
   IFS= read -r password || true
@@ -365,8 +388,7 @@ start_create_ap() {
       | awk -F: '$2 == "wifi" && $1 !~ /^p2p-/ && $3 != "unavailable" { print $1; exit }')"
   fi
   if [ "$upstream" = auto ] || [ -z "$upstream" ]; then
-    upstream="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
-      | awk -F: '$2 == "ethernet" && $3 == "connected" { print $1; exit }')"
+    upstream="$(auto_upstream_interface)" || die "No active upstream route was detected"
   fi
   [ -n "$wifi" ] || die "No Wi-Fi interface was detected"
   [ -n "$upstream" ] || die "No upstream interface was selected"
@@ -382,10 +404,7 @@ start_create_ap() {
   valid_iface "$upstream" || die "Invalid upstream interface name"
   case "$channel_mode" in auto|manual) ;; *) die "Invalid channel mode" ;; esac
   if [ "$channel_mode" = manual ]; then
-    case "$channel" in
-      '' | *[!0-9]*) die "Invalid Wi-Fi channel" ;;
-    esac
-    [ "$channel" -ge 1 ] && [ "$channel" -le 196 ] || die "Wi-Fi channel is out of range"
+    valid_channel_for_band "$band" "$channel" || die "Invalid Wi-Fi channel for the selected band"
   fi
 
   if discover_instance; then
@@ -403,9 +422,33 @@ start_create_ap() {
   # live values so both GUI habits and panel edits are honored.
   local args=()
   if [ -r /etc/create_ap.conf ]; then
-    args+=(--config /etc/create_ap.conf)
+    # Keep the user's non-interactive create_ap tuning, but remove values that
+    # conflict with Omaspot's explicit interfaces, credentials, band, channel
+    # policy, or positional argument shape. In particular SHARE_METHOD=none
+    # changes how create_ap parses the interface arguments and ignores stdin.
+    config_file="$(mktemp "$RUN_DIR/create_ap-config.XXXXXX")" || die "Cannot create a private create_ap config"
+    if ! awk -F= '
+      {
+        key = $1
+        sub(/\r$/, "", key)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+        if (toupper(key) ~ /^(CHANNEL|SHARE_METHOD|SSID|PASSPHRASE|USE_PSK|WIFI_IFACE|INTERNET_IFACE|FREQ_BAND)$/) next
+      }
+      { print }
+    ' /etc/create_ap.conf >"$config_file"; then
+      rm -f -- "$config_file"
+      die "Cannot prepare a compatible create_ap config"
+    fi
+    chmod 0600 -- "$config_file" || { rm -f -- "$config_file"; die "Cannot secure the create_ap config"; }
+    args+=(--config "$config_file")
   fi
   args+=(--freq-band "$band")
+  # Request HT on either band; VHT provides wider channels on 5 GHz when the
+  # adapter, hostapd, client, and regulatory domain support it.
+  args+=(--ieee80211n)
+  if [ "$band" = 5 ]; then
+    args+=(--ieee80211ac --vht-chwidth 80)
+  fi
   if [ "$channel_mode" = manual ]; then
     args+=(-c "$channel")
   fi
@@ -415,8 +458,15 @@ start_create_ap() {
   # credentials never appear in the pkexec command line or shell history.
   # The process is held open (like the wihotspot GUI) until the hotspot stops;
   # its output is captured live so failures can be shown from the log tail.
+  # Recheck immediately before the privilege boundary. This narrows the race,
+  # but only create_ap itself can make creation of COMMON_CONF_DIR atomic.
+  if ! common_conf_dir_safe; then
+    [ -z "$config_file" ] || rm -f -- "$config_file"
+    require_safe_common_conf_dir
+  fi
   printf '%s\n%s\n' "$ssid" "$password" | as_root "${args[@]}" >"$LOG_FILE" 2>&1
   local rc=$?
+  [ -z "$config_file" ] || rm -f -- "$config_file"
 
   # create_ap exits 0 after a clean stop (SIGUSR1 from `create_ap --stop`),
   # and non-zero when it fails; pkexec propagates the code. So the exit
@@ -456,13 +506,17 @@ stop_hotspot() {
       current_starttime="$(proc_starttime "$saved_pid" 2>/dev/null || true)"
       if [ -n "$saved_starttime" ] && [ "$current_starttime" = "$saved_starttime" ]; then
         if [ "$want" = auto ] || [ "$want" = "$(record_field wifi_iface 2>/dev/null || true)" ]; then
-          as_root --stop "$saved_pid" >/dev/null 2>&1 || true
+          # The fallback still enters create_ap's privileged cleanup path, so
+          # it must obey the same common-directory guard as a normal stop.
+          require_safe_common_conf_dir
+          as_root --stop "$saved_pid" >/dev/null 2>&1 || die "Could not request hotspot shutdown"
           local waited=0
           while [ "$waited" -lt 20 ]; do
             pid_is_create_ap "$saved_pid" >/dev/null 2>&1 || break
             sleep 0.25
             waited=$((waited + 1))
           done
+          pid_is_create_ap "$saved_pid" && die "Hotspot process did not stop"
         fi
       fi
     fi
@@ -503,12 +557,12 @@ stop_hotspot() {
   if ! common_conf_dir_safe; then
     printf 'omaspot: %s\n' "Refusing to stop: $COMMON_CONF_DIR is not owned by root" >&2
     printf 'omaspot: %s\n' "Clear it with: sudo rm -rf $COMMON_CONF_DIR" >&2
-    return 0
+    return 1
   fi
 
   # Signal the daemon the same way the GUI does. The daemon runs as root, so
   # a plain kill is not permitted; --stop sends SIGUSR1 through create_ap.
-  as_root --stop "$pid" >/dev/null 2>&1 || true
+  as_root --stop "$pid" >/dev/null 2>&1 || die "Could not request hotspot shutdown"
   # create_ap tears everything down (hostapd, dnsmasq, ap0, iptables) on exit;
   # wait up to 10s for the instance to disappear.
   local waited=0
@@ -517,6 +571,7 @@ stop_hotspot() {
     sleep 0.25
     waited=$((waited + 1))
   done
+  discover_instance && die "Hotspot did not stop"
   clear_record
   : > "$LOG_FILE" 2>/dev/null || true
 }
@@ -665,6 +720,7 @@ DEP_SPECS=(
   'create_ap|linux-wifi-hotspot|blocking|yay -S --needed linux-wifi-hotspot'
   'pkexec|polkit|blocking|yay -S --needed polkit'
   'nmcli|networkmanager|blocking|yay -S --needed networkmanager'
+  'ip|iproute2|blocking|yay -S --needed iproute2'
   'stat|coreutils|blocking|yay -S --needed coreutils'
   'qrencode|qrencode|optional|yay -S --needed qrencode'
   'iw|iw|optional|yay -S --needed iw'
