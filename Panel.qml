@@ -655,7 +655,7 @@ Panel {
     if (hotspotActive) scheduleQr()
   }
 
-  RightAlignedPanel {
+  KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.hostWidget || root
