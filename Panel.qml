@@ -113,7 +113,7 @@ Panel {
     var clean = String(message || "").replace(/^omaspot:\s*/i, "").trim()
     if (clean === "") clean = "The hotspot operation failed"
     errorMessage = clean
-    notifyProc.command = ["notify-send", "--expire-time=15000", "--urgency=critical", "--app-name=Omaspot", "Omaspot", clean]
+    notifyProc.command = ["notify-send", "--expire-time=15000", "--urgency=normal", "--app-name=Omaspot", "Omaspot", clean]
     notifyProc.running = true
     errorTimer.restart()
   }
