@@ -36,6 +36,22 @@ LOG_FILE="$RUN_DIR/create_ap.log"
 # Our own record of the instance we last validated. Private to this user, so it
 # is authoritative in a way the shared /tmp state can never be.
 STATE_FILE="$RUN_DIR/instance"
+# "<pid> <starttime>" of the omaspotctl process holding create_ap open. While
+# it is alive, a start is in flight and the log belongs to it.
+HOLDER_FILE="$RUN_DIR/holder"
+# "<pid> <epoch>" of the instance whose AP link was first seen without carrier.
+DOWN_FILE="$RUN_DIR/link-down"
+# "<pid> <starttime>" of the dead instance we already asked to stop, so a
+# failing stop is not retried through pkexec on every status poll.
+REAP_FILE="$RUN_DIR/reaped"
+# Successful system suspends since boot. An AP that lost carrier after the
+# count moved did not survive the suspend, so it is dead rather than flapping.
+SUSPEND_STATS=/sys/power/suspend_stats/success
+# Without a suspend to explain it, a carrier loss must outlast this many
+# seconds (and the instance must be older than LINK_START_GRACE) before the
+# hotspot is declared dead, so DFS channel checks and brief flaps survive.
+LINK_DOWN_GRACE=20
+LINK_START_GRACE=90
 
 # Populated by discover_instance once every check below has passed.
 INST_CONF=''
@@ -264,8 +280,8 @@ record_instance() {
   secure_run_dir || return 0
   (
     umask 077
-    printf 'pid=%s\nwifi_iface=%s\nstarttime=%s\nconfdir=%s\n' \
-      "$1" "$2" "$3" "$4" >"$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+    printf 'pid=%s\nwifi_iface=%s\nstarttime=%s\nconfdir=%s\nsuspends=%s\n' \
+      "$1" "$2" "$3" "$4" "${5:-}" >"$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
   ) 2>/dev/null || true
 }
 
@@ -293,7 +309,7 @@ instance_hostapd_alive() {
     comm=""
     read -r comm <"$p/comm" 2>/dev/null || continue
     [ "$comm" = "hostapd" ] || continue
-    if grep -qaF "$conf" "$p/cmdline" 2>/dev/null; then
+    if grep -qaF "$conf/" "$p/cmdline" 2>/dev/null; then
       found=1
       break
     fi
@@ -338,6 +354,129 @@ discover_instance() {
   return 1
 }
 
+# True while a `start` invocation of this script is still holding create_ap
+# open. During that window discover_instance can fail (hostapd not up yet), and
+# the log must be left alone or the eventual failure message is lost.
+holder_alive() {
+  local pid starttime
+  [ -f "$HOLDER_FILE" ] && [ ! -L "$HOLDER_FILE" ] || return 1
+  read -r pid starttime <"$HOLDER_FILE" 2>/dev/null || return 1
+  valid_pid "$pid" || return 1
+  [ -n "$starttime" ] && [ "$(proc_starttime "$pid" 2>/dev/null)" = "$starttime" ]
+}
+
+# hostapd/dnsmasq pids left behind by a create_ap that died without running its
+# cleanup (killed, crashed, or torn down with its pkexec scope). They keep the
+# DHCP/DNS sockets and the AP address, so every later start fails with
+# "Address already in use". Only root-owned create_ap conf dirs whose create_ap
+# pid is gone count; a live instance is never reported.
+orphaned_pids() {
+  local dir pid p comm
+  for dir in /tmp/create_ap.*.conf.*; do
+    [ -d "$dir" ] && root_owned_unwritable "$dir" || continue
+    pid="$(read_state_line "$dir/pid")"
+    if valid_pid "$pid" && pid_is_create_ap "$pid"; then continue; fi
+    for p in /proc/[0-9]*; do
+      comm=""
+      read -r comm <"$p/comm" 2>/dev/null || continue
+      case "$comm" in hostapd | dnsmasq) ;; *) continue ;; esac
+      [ "$(stat -c '%u' -- "$p" 2>/dev/null)" = "0" ] || continue
+      grep -qaF "$dir/" "$p/cmdline" 2>/dev/null && printf '%s\n' "${p#/proc/}"
+    done
+  done
+}
+
+suspend_count() {
+  local n
+  n="$(read_state_line "$SUSPEND_STATS")"
+  case "$n" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s' "$n"
+}
+
+# The suspend count to store with the instance record: kept from the existing
+# record while it still describes the same process, otherwise the current one.
+instance_suspends() {
+  local pid="$1" starttime="$2" saved
+  if [ "$(record_field pid)" = "$pid" ] && [ "$(record_field starttime)" = "$starttime" ]; then
+    saved="$(record_field suspends)"
+    case "$saved" in
+      '' | *[!0-9]*) ;;
+      *) printf '%s' "$saved"; return 0 ;;
+    esac
+  fi
+  suspend_count || true
+}
+
+# create_ap, hostapd and the AP interface all survive a suspend, but the radio
+# does not come back: NetworkManager unmanages the Wi-Fi device on sleep and
+# re-manages it on resume, leaving the AP interface without carrier and no
+# longer beaconing. Every process check still passes, so the carrier is the
+# only reliable sign that the hotspot is gone. True when INST_* is dead.
+instance_link_dead() {
+  local iface="$INST_IFACE" pid="$INST_PID" starttime="$INST_STARTTIME"
+  local carrier saved now since down_pid uptime tck age
+  carrier="$(read_state_line "/sys/class/net/$iface/carrier")"
+  if [ "$carrier" = 1 ]; then
+    rm -f -- "$DOWN_FILE" 2>/dev/null || true
+    return 1
+  fi
+
+  # A suspend since this instance was recorded active explains the carrier
+  # loss outright; no need to wait.
+  if [ "$(record_field pid)" = "$pid" ] && [ "$(record_field starttime)" = "$starttime" ]; then
+    saved="$(record_field suspends)"
+    now="$(suspend_count || true)"
+    case "$saved:$now" in
+      *[!0-9:]* | :* | *:) ;;
+      *) [ "$now" -gt "$saved" ] && return 0 ;;
+    esac
+  fi
+
+  now="$(date +%s)"
+  down_pid=''
+  since=''
+  [ -f "$DOWN_FILE" ] && read -r down_pid since <"$DOWN_FILE" 2>/dev/null
+  case "$since" in '' | *[!0-9]*) down_pid='' ;; esac
+  if [ "$down_pid" != "$pid" ]; then
+    secure_run_dir && ( umask 077; printf '%s %s\n' "$pid" "$now" >"$DOWN_FILE" ) 2>/dev/null
+    return 1
+  fi
+
+  # Seconds since create_ap started: /proc/uptime and the stat start time share
+  # the boot clock.
+  read -r uptime _ </proc/uptime 2>/dev/null || return 1
+  tck="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+  age=$(( ${uptime%.*} - starttime / tck ))
+  [ "$age" -ge "$LINK_START_GRACE" ] && [ $((now - since)) -ge "$LINK_DOWN_GRACE" ]
+}
+
+# Ask create_ap to run its own cleanup for a dead instance (INST_*), exactly
+# like a manual stop, so hostapd/dnsmasq/ap0/iptables are torn down and the
+# next start does not collide with them. Attempted once per instance.
+reap_dead_instance() {
+  local pid="$INST_PID" starttime="$INST_STARTTIME" r_pid r_start waited=0
+  if [ -f "$REAP_FILE" ] && read -r r_pid r_start <"$REAP_FILE" 2>/dev/null &&
+    [ "$r_pid" = "$pid" ] && [ "$r_start" = "$starttime" ]; then
+    return 1
+  fi
+  secure_run_dir && ( umask 077; printf '%s %s\n' "$pid" "$starttime" >"$REAP_FILE" ) 2>/dev/null
+  common_conf_dir_safe || return 1
+  # Same identity re-check as stop_hotspot, right before the privileged call.
+  pid_is_create_ap "$pid" || return 1
+  [ "$(proc_starttime "$pid" 2>/dev/null)" = "$starttime" ] || return 1
+  [ "$(read_state_line "$INST_CONF/pid")" = "$pid" ] || return 1
+  as_root --stop "$pid" >/dev/null 2>&1 || return 1
+  while [ "$waited" -lt 40 ]; do
+    pid_is_create_ap "$pid" >/dev/null 2>&1 || break
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  pid_is_create_ap "$pid" >/dev/null 2>&1 && return 1
+  rm -f -- "$DOWN_FILE" 2>/dev/null || true
+  clear_record
+  return 0
+}
+
 interfaces() {
   need nmcli
   nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>/dev/null \
@@ -353,13 +492,28 @@ interfaces() {
 running_record() {
   local log_tail
   if discover_instance; then
-    record_instance "$INST_PID" "$INST_IFACE" "$INST_STARTTIME" "$INST_CONF"
-    printf 'active\t%s\t%s\t\n' "$INST_IFACE" "$INST_PID"
+    if ! instance_link_dead; then
+      record_instance "$INST_PID" "$INST_IFACE" "$INST_STARTTIME" "$INST_CONF" \
+        "$(instance_suspends "$INST_PID" "$INST_STARTTIME")"
+      printf 'active\t%s\t%s\t\n' "$INST_IFACE" "$INST_PID"
+      return 0
+    fi
+    # The processes are alive but the AP is not (typically after a suspend).
+    # Report it as stopped and let create_ap clean up after itself; the start
+    # process holding it then exits on its own and the panel can start fresh.
+    reap_dead_instance || true
+    printf 'inactive\t\t\t\n'
+    return 0
+  fi
+
+  # A start is still in progress: not active yet, but not failed either.
+  if holder_alive; then
+    printf 'inactive\t\t\t\n'
     return 0
   fi
 
   if [ -r "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
-    log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
+    log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | tr -d '\000' | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
     [ -n "$log_tail" ] && printf 'omaspot: %s\n' "$log_tail" >&2
     : > "$LOG_FILE" 2>/dev/null || true
   fi
@@ -369,6 +523,21 @@ running_record() {
 
 status() {
   running_record
+}
+
+# Private create_ap configs left behind by earlier holders that never got to
+# remove them. Any that no running create_ap names on its command line is
+# unused and goes.
+sweep_stale_configs() {
+  local f p in_use
+  for f in "$RUN_DIR"/create_ap-config.*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    in_use=0
+    for p in /proc/[0-9]*; do
+      grep -qaF "$f" "$p/cmdline" 2>/dev/null && { in_use=1; break; }
+    done
+    [ "$in_use" -eq 1 ] || rm -f -- "$f"
+  done
 }
 
 start_create_ap() {
@@ -408,14 +577,39 @@ start_create_ap() {
   fi
 
   if discover_instance; then
-    die "A create_ap hotspot is already running (pid $INST_PID)"
+    if instance_link_dead; then
+      reap_dead_instance || die "A previous hotspot is no longer working and could not be stopped (pid $INST_PID)"
+    else
+      die "A create_ap hotspot is already running (pid $INST_PID)"
+    fi
   fi
 
   require_safe_common_conf_dir
 
+  local orphans
+  orphans="$(orphaned_pids | sort -un | tr '\n' ' ')"
+  orphans="${orphans% }"
+  if [ -n "$orphans" ]; then
+    die "A previous hotspot did not shut down cleanly; its hostapd/dnsmasq are still running and block a new one. Clear them with: sudo kill $orphans"
+  fi
+
   secure_run_dir || die "Cannot create the state directory: $RUN_DIR"
+  # A just-reaped instance's holder needs a moment to notice create_ap exited.
+  local hw=0
+  while holder_alive && [ "$hw" -lt 20 ]; do sleep 0.25; hw=$((hw + 1)); done
+  holder_alive && die "A hotspot start is already in progress"
   : > "$LOG_FILE"
   chmod 0600 "$LOG_FILE"
+  local my_starttime
+  my_starttime="$(proc_starttime "$$")" || die "Cannot read own process start time"
+  ( umask 077; printf '%s %s\n' "$$" "$my_starttime" >"$HOLDER_FILE" ) || die "Cannot write $HOLDER_FILE"
+  # Bash skips the EXIT trap when a signal kills it, and the shell reloading
+  # does exactly that to this holder, so turn those signals into an exit.
+  trap 'rm -f -- "$HOLDER_FILE" ${config_file:+"$config_file"}' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  sweep_stale_configs
 
   # /etc/create_ap.conf carries the user's tuned defaults (gateway, sharing
   # method, MAC filter, ...). Load it first, then override with the panel's
@@ -464,7 +658,7 @@ start_create_ap() {
     [ -z "$config_file" ] || rm -f -- "$config_file"
     require_safe_common_conf_dir
   fi
-  printf '%s\n%s\n' "$ssid" "$password" | as_root "${args[@]}" >"$LOG_FILE" 2>&1
+  printf '%s\n%s\n' "$ssid" "$password" | as_root "${args[@]}" >>"$LOG_FILE" 2>&1
   local rc=$?
   [ -z "$config_file" ] || rm -f -- "$config_file"
 
@@ -477,7 +671,7 @@ start_create_ap() {
   fi
 
   local log_tail
-  log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
+  log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | tr -d '\000' | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
   if [ -n "$log_tail" ]; then
     printf 'omaspot: %s\n' "$log_tail" >&2
   elif [ "$rc" -eq 126 ]; then
@@ -521,7 +715,7 @@ stop_hotspot() {
       fi
     fi
     clear_record
-    : > "$LOG_FILE" 2>/dev/null || true
+    holder_alive || : > "$LOG_FILE" 2>/dev/null || true
     return 0
   fi
 
@@ -682,7 +876,7 @@ clients() {
 
 qr() {
   need qrencode
-  local ssid password payload
+  local ssid password payload esc_ssid esc_password
   IFS= read -r ssid || true
   IFS= read -r password || true
   [ -n "$ssid" ] || die "Hotspot name is empty"
