@@ -36,6 +36,10 @@ LOG_FILE="$RUN_DIR/create_ap.log"
 # Our own record of the instance we last validated. Private to this user, so it
 # is authoritative in a way the shared /tmp state can never be.
 STATE_FILE="$RUN_DIR/instance"
+# Full diagnostic report for the most recent failure, printed by `lastlog` so
+# the panel's Copy log button can hand it to a person or an agent.
+REPORT_FILE="$RUN_DIR/last-error.log"
+PLUGIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 # "<pid> <starttime>" of the omaspotctl process holding create_ap open. While
 # it is alive, a start is in flight and the log belongs to it.
 HOLDER_FILE="$RUN_DIR/holder"
@@ -58,6 +62,12 @@ INST_CONF=''
 INST_PID=''
 INST_IFACE=''
 INST_STARTTIME=''
+# Set by instance_link_dead to explain why a still-running instance is dead.
+DEAD_REASON=''
+DEAD_HINT=''
+# Set by classify_failure.
+FAIL_TITLE=''
+FAIL_HINT=''
 
 die() {
   printf 'omaspot: %s\n' "$*" >&2
@@ -428,7 +438,13 @@ instance_link_dead() {
     now="$(suspend_count || true)"
     case "$saved:$now" in
       *[!0-9:]* | :* | *:) ;;
-      *) [ "$now" -gt "$saved" ] && return 0 ;;
+      *)
+        if [ "$now" -gt "$saved" ]; then
+          DEAD_REASON="Hotspot stopped when the laptop went to sleep"
+          DEAD_HINT="Wi-Fi hotspots don't survive suspend. Turn it on again to reconnect your devices."
+          return 0
+        fi
+        ;;
     esac
   fi
 
@@ -447,7 +463,10 @@ instance_link_dead() {
   read -r uptime _ </proc/uptime 2>/dev/null || return 1
   tck="$(getconf CLK_TCK 2>/dev/null || echo 100)"
   age=$(( ${uptime%.*} - starttime / tck ))
-  [ "$age" -ge "$LINK_START_GRACE" ] && [ $((now - since)) -ge "$LINK_DOWN_GRACE" ]
+  [ "$age" -ge "$LINK_START_GRACE" ] && [ $((now - since)) -ge "$LINK_DOWN_GRACE" ] || return 1
+  DEAD_REASON="Hotspot lost its Wi-Fi link"
+  DEAD_HINT="The Wi-Fi radio on $iface went down and stayed down. Turn the hotspot on again; if it keeps happening, copy the log."
+  return 0
 }
 
 # Ask create_ap to run its own cleanup for a dead instance (INST_*), exactly
@@ -489,6 +508,105 @@ interfaces() {
       done
 }
 
+# Errors reach the panel as "title||hint||log": a short plain-language title,
+# an optional next step, and "log" when a full report was saved for `lastlog`.
+# Model.parseError reads the same format; a message without "||" is a title.
+fmt_error() {
+  printf '%s||%s||%s' "$1" "${2:-}" "${3:-}"
+}
+
+# Turn create_ap's output into something a person can act on. The raw output
+# still goes into the report; this only picks the headline.
+classify_failure() {
+  local text="$1"
+  FAIL_TITLE="$2"
+  FAIL_HINT="Copy the log to see exactly what create_ap reported."
+  case "$text" in
+    *"Address already in use"*)
+      FAIL_TITLE="Another service is using the hotspot's network address"
+      FAIL_HINT="An earlier hotspot may still be running in the background. Copy the log for details." ;;
+    *"does not support AP (master) mode"*)
+      FAIL_TITLE="This Wi-Fi card can't host a hotspot"
+      FAIL_HINT="Its driver does not support access point mode." ;;
+    *"station (i.e. be connected) and an AP at the same time"* | *"can only run an access point on the channel it is already"*)
+      FAIL_TITLE="Wi-Fi is busy on another channel"
+      FAIL_HINT="Disconnect from your Wi-Fi network or set the channel to Auto, then try again." ;;
+    *"can not transmit to channel"* | *"Could not set channel"* | *"not allowed"*)
+      FAIL_TITLE="That channel isn't allowed here"
+      FAIL_HINT="Set the channel to Auto, or switch to 2.4 GHz, then try again." ;;
+    *"rfkill"* | *"Failed to run hostapd"* | *"Could not configure driver mode"*)
+      FAIL_TITLE="The Wi-Fi radio refused to start the hotspot"
+      FAIL_HINT="Wi-Fi may be off or blocked. Turn Wi-Fi on, or try 2.4 GHz." ;;
+    *"share your connection from the same"*)
+      FAIL_TITLE="The hotspot can't share the Wi-Fi it runs on"
+      FAIL_HINT="Choose a different internet source, such as Ethernet, in the upstream setting." ;;
+    *"is not an interface"*)
+      FAIL_TITLE="The internet source isn't available"
+      FAIL_HINT="Pick a connected upstream, or set it to Auto." ;;
+    *"is not a WiFi interface"* | *"does not exist"*)
+      FAIL_TITLE="Wi-Fi adapter not found"
+      FAIL_HINT="Check that Wi-Fi is enabled and the adapter is connected." ;;
+    *"Failed to initialize lock"* | *"Failed to lock mutex"*)
+      FAIL_TITLE="Another hotspot operation is still running"
+      FAIL_HINT="Wait a few seconds and try again." ;;
+    *"hostapd not found"*)
+      FAIL_TITLE="hostapd is missing"
+      FAIL_HINT="Reinstall linux-wifi-hotspot to bring it back." ;;
+  esac
+}
+
+# Writes REPORT_FILE: what happened, the full create_ap output, and enough
+# system state to diagnose it without a back-and-forth. Args: title, hint,
+# context line, and optionally a secret to redact (the passphrase).
+save_error_report() {
+  local title="$1" hint="$2" context="$3" secret="${4:-}" log version
+  secure_run_dir || return 1
+  log="$(tr -d '\000' <"$LOG_FILE" 2>/dev/null || true)"
+  [ -n "$secret" ] && log="${log//"$secret"/[redacted]}"
+  version="$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_DIR/manifest.json" 2>/dev/null | head -n 1)"
+  (
+    umask 077
+    {
+      printf '# Omaspot error report\n\n'
+      printf 'Summary: %s\n' "$title"
+      [ -n "$hint" ] && printf 'Hint: %s\n' "$hint"
+      printf 'When: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+      printf 'Context: %s\n' "$context"
+      printf 'Omaspot: %s\n' "${version:-unknown}"
+      printf 'Kernel: %s\n' "$(uname -r)"
+      printf 'linux-wifi-hotspot: %s\n' "$(pacman -Q linux-wifi-hotspot 2>/dev/null || echo unknown)"
+      printf 'Suspends since boot: %s\n' "$(suspend_count 2>/dev/null || echo unknown)"
+      printf '\n## create_ap output\n```\n%s\n```\n' "${log:-(empty)}"
+      printf '\n## Wireless devices (iw dev)\n```\n%s\n```\n' "$(iw dev 2>&1 || true)"
+      printf '\n## rfkill\n```\n%s\n```\n' "$(rfkill list 2>&1 || true)"
+      printf '\n## Links (ip -br addr)\n```\n%s\n```\n' "$(ip -br addr 2>&1 || true)"
+      printf '\n## NetworkManager devices\n```\n%s\n```\n' "$(nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>&1 || true)"
+      printf '\n## Hotspot processes\n```\n%s\n```\n' "$(pgrep -a 'hostapd|dnsmasq' 2>&1; pgrep -af '/usr/bin/create_ap' 2>&1 | grep -v pgrep)"
+      printf '\n## Recent system log (hotspot, Wi-Fi, suspend)\n```\n%s\n```\n' \
+        "$(timeout 5 journalctl -b --no-pager -o short-iso --since '15 min ago' 2>/dev/null \
+          | grep -iE 'hostapd|dnsmasq|create_ap|iwlwifi|ath|rtw|mt7|brcm|wlp|wlan|ap0|PM: suspend|rfkill' | tail -n 60)"
+    } >"$REPORT_FILE.tmp" && mv -f "$REPORT_FILE.tmp" "$REPORT_FILE"
+  ) 2>/dev/null
+}
+
+lastlog() {
+  if [ -f "$REPORT_FILE" ] && [ ! -L "$REPORT_FILE" ]; then
+    cat -- "$REPORT_FILE"
+  else
+    printf 'Omaspot has not recorded an error yet.\n'
+  fi
+}
+
+# Status line: state, interface, pid, upstream, stop reason. The reason is only
+# set on the poll that discovers the hotspot went away, and travels on stdout
+# with the state so the panel never has to pair it up with a separate stderr.
+print_inactive() {
+  local reason="${1:-}"
+  reason="${reason//$'\t'/ }"
+  reason="${reason//$'\n'/ }"
+  printf 'inactive\t\t\t\t%s\n' "$reason"
+}
+
 running_record() {
   local log_tail
   if discover_instance; then
@@ -501,24 +619,36 @@ running_record() {
     # The processes are alive but the AP is not (typically after a suspend).
     # Report it as stopped and let create_ap clean up after itself; the start
     # process holding it then exits on its own and the panel can start fresh.
-    reap_dead_instance || true
-    printf 'inactive\t\t\t\n'
+    # Only the poll that actually tears it down carries the reason, so the
+    # panel is told once rather than on every poll after a failed stop.
+    if reap_dead_instance; then
+      save_error_report "$DEAD_REASON" "$DEAD_HINT" "status: running hotspot on $INST_IFACE (pid $INST_PID) was found dead and stopped"
+      print_inactive "$(fmt_error "$DEAD_REASON" "$DEAD_HINT" log)"
+    else
+      print_inactive
+    fi
     return 0
   fi
 
   # A start is still in progress: not active yet, but not failed either.
   if holder_alive; then
-    printf 'inactive\t\t\t\n'
+    print_inactive
     return 0
   fi
 
+  # create_ap exited on its own (a clean stop empties the log first), so
+  # whatever it last printed is why the hotspot is gone.
   if [ -r "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
-    log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | tr -d '\000' | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
-    [ -n "$log_tail" ] && printf 'omaspot: %s\n' "$log_tail" >&2
+    log_tail="$(tr -d '\000' <"$LOG_FILE" 2>/dev/null || true)"
+    classify_failure "$log_tail" "The hotspot stopped unexpectedly"
+    save_error_report "$FAIL_TITLE" "$FAIL_HINT" "status: create_ap exited on its own"
     : > "$LOG_FILE" 2>/dev/null || true
+    clear_record
+    print_inactive "$(fmt_error "$FAIL_TITLE" "$FAIL_HINT" log)"
+    return 0
   fi
   clear_record
-  printf 'inactive\t\t\t\n'
+  print_inactive
 }
 
 status() {
@@ -578,7 +708,7 @@ start_create_ap() {
 
   if discover_instance; then
     if instance_link_dead; then
-      reap_dead_instance || die "A previous hotspot is no longer working and could not be stopped (pid $INST_PID)"
+      reap_dead_instance || die "$(fmt_error "The previous hotspot could not be shut down" "It stopped working but did not exit (pid $INST_PID). Try again in a few seconds.")"
     else
       die "A create_ap hotspot is already running (pid $INST_PID)"
     fi
@@ -590,7 +720,7 @@ start_create_ap() {
   orphans="$(orphaned_pids | sort -un | tr '\n' ' ')"
   orphans="${orphans% }"
   if [ -n "$orphans" ]; then
-    die "A previous hotspot did not shut down cleanly; its hostapd/dnsmasq are still running and block a new one. Clear them with: sudo kill $orphans"
+    die "$(fmt_error "An old hotspot is still running in the background" "Its hostapd/dnsmasq block a new one. Clear them in a terminal with: sudo kill $orphans")"
   fi
 
   secure_run_dir || die "Cannot create the state directory: $RUN_DIR"
@@ -670,15 +800,20 @@ start_create_ap() {
     return 0
   fi
 
-  local log_tail
-  log_tail="$(tail -n 8 "$LOG_FILE" 2>/dev/null | tr -d '\000' | sed '/^[[:space:]]*$/d' | tr '\n' ' ' || true)"
-  if [ -n "$log_tail" ]; then
-    printf 'omaspot: %s\n' "$log_tail" >&2
-  elif [ "$rc" -eq 126 ]; then
-    printf 'omaspot: Polkit authorization was cancelled\n' >&2
+  local log_text context
+  log_text="$(tr -d '\000' <"$LOG_FILE" 2>/dev/null || true)"
+  local shown_channel=auto
+  [ "$channel_mode" = manual ] && shown_channel="$channel"
+  context="start: wifi=$wifi upstream=$upstream band=$band channel=$shown_channel exit=$rc"
+  if [ "$rc" -eq 126 ] && [ -z "${log_text//[[:space:]]/}" ]; then
+    printf 'omaspot: %s\n' "$(fmt_error "Permission was denied" "The authorization prompt was cancelled or refused.")" >&2
   else
-    printf 'omaspot: The hotspot exited unexpectedly (code %s)\n' "$rc" >&2
+    classify_failure "$log_text" "The hotspot couldn't start"
+    save_error_report "$FAIL_TITLE" "$FAIL_HINT" "$context" "$password"
+    printf 'omaspot: %s\n' "$(fmt_error "$FAIL_TITLE" "$FAIL_HINT" log)" >&2
   fi
+  # Reported here, so the next status poll must not report it a second time.
+  : > "$LOG_FILE" 2>/dev/null || true
   return 1
 }
 
@@ -949,5 +1084,6 @@ case "$command_name" in
   stop) [ "$#" -eq 1 ] || die "stop expects a Wi-Fi interface"; stop_hotspot "$1" ;;
   clients) [ "$#" -eq 0 ] || die "clients expects no arguments"; clients ;;
   qr) qr ;;
+  lastlog) lastlog ;;
   *) die "Unknown command: $command_name" ;;
 esac

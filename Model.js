@@ -40,7 +40,31 @@ function parseStatus(raw) {
   return {
     state: fields[0] === "active" ? "active" : "inactive",
     hotspotInterface: fields[1] || "",
-    upstream: fields[3] || ""
+    upstream: fields[3] || "",
+    // Why the hotspot went away; only present on the poll that noticed it.
+    reason: String(fields[4] || "").replace(/^omaspot:\s*/i, "").trim()
+  }
+}
+
+// Backend errors arrive as "title||hint||log" (see fmt_error in omaspotctl):
+// a short headline, an optional next step, and "log" when a full report can be
+// copied with `omaspotctl lastlog`. Anything without "||" is a bare title.
+function parseError(raw) {
+  var text = String(raw || "").trim()
+  if (text === "") return { title: "", hint: "", hasLog: false }
+  // stderr can carry stray lines (shell warnings) around the real message;
+  // prefer the last line in the structured format when there is one.
+  var lines = text.split(/\r?\n/)
+  for (var i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].indexOf("||") >= 0) { text = lines[i]; break }
+  }
+  text = text.trim().replace(/^omaspot:\s*/i, "")
+  if (text.indexOf("||") < 0) return { title: text, hint: "", hasLog: false }
+  var parts = text.split("||")
+  return {
+    title: String(parts[0] || "").trim(),
+    hint: String(parts[1] || "").trim(),
+    hasLog: String(parts[2] || "").trim() === "log"
   }
 }
 
@@ -178,6 +202,7 @@ if (typeof module !== "undefined") {
     defaults: defaults,
     parseState: parseState,
     parseStatus: parseStatus,
+    parseError: parseError,
     parseInterfaces: parseInterfaces,
     parseClients: parseClients,
     parseDoctor: parseDoctor,

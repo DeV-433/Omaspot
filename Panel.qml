@@ -24,6 +24,17 @@ Panel {
   property string statusError: ""
   property real lastStatusTickMs: 0
   property string errorMessage: ""
+  // Why the last hotspot stopped on its own (suspend, link loss, create_ap
+  // exiting). Unlike errorMessage it does not time out, so it is still there
+  // when the panel is opened long after the fact; the next start clears it.
+  property string stopReason: ""
+  property bool logCopied: false
+  // The one error the card shows, most immediate first, already split into
+  // title / hint / whether a full log can be copied.
+  readonly property string activeError: errorMessage !== "" ? errorMessage
+    : statusError !== "" ? statusError
+    : !hotspotActive && !busy ? stopReason : ""
+  readonly property var errorInfo: Model.parseError(activeError)
   property string ssid: "Omaspot"
   property string password: "omaspot123"
   property string band: "2.4"
@@ -63,7 +74,7 @@ Panel {
   readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
   readonly property color statusColor: status === "active" ? Commons.Color.accent
     : (status === "starting" || status === "stopping") ? Commons.Color.accent
-    : statusError !== "" || errorMessage !== "" ? Commons.Color.urgent : Commons.Color.muted
+    : statusError !== "" || errorMessage !== "" || stopReason !== "" ? Commons.Color.urgent : Commons.Color.muted
 
   function open() {
     root.controller.show()
@@ -112,15 +123,36 @@ Panel {
   function showError(message) {
     var clean = String(message || "").replace(/^omaspot:\s*/i, "").trim()
     if (clean === "") clean = "The hotspot operation failed"
+    var info = Model.parseError(clean)
     errorMessage = clean
-    notifyProc.command = ["notify-send", "--expire-time=15000", "--urgency=normal", "--app-name=Omaspot", "Omaspot", clean]
+    logCopied = false
+    var body = info.hint !== "" ? info.title + "\n" + info.hint : info.title
+    if (info.hasLog) body += "\nOpen Omaspot to copy the log."
+    notifyProc.command = ["notify-send", "--expire-time=15000", "--urgency=normal", "--app-name=Omaspot", "Omaspot", body]
     notifyProc.running = true
-    errorTimer.restart()
+    // An error with a log stays until dismissed or the next start, so it is
+    // still there to copy when the panel is opened later.
+    if (info.hasLog) errorTimer.stop()
+    else errorTimer.restart()
   }
 
   function clearError() {
     errorMessage = ""
     statusError = ""
+  }
+
+  function dismissError() {
+    clearError()
+    stopReason = ""
+    logCopied = false
+  }
+
+  // The report is read by the backend at copy time, never held in QML, and
+  // goes straight to the clipboard for pasting into a chat or an agent.
+  function copyErrorLog() {
+    Quickshell.execDetached(["bash", "-c", Util.shellQuote(backendPath) + " lastlog | wl-copy"])
+    logCopied = true
+    logCopiedTimer.restart()
   }
 
   function refreshStatus() {
@@ -182,18 +214,22 @@ Panel {
     var result = Model.parseStatus(raw)
     var previous = status
     if (startPending && result.state === "inactive") return
+    if (result.reason !== "") stopReason = result.reason
     status = result.state
     hotspotInterface = result.hotspotInterface
     if (result.upstream !== "" && upstream === "auto") upstream = result.upstream
     if (previous !== status && status === "active") {
       startPending = false
+      stopReason = ""
       saveState()
       scheduleQr()
       refreshClients()
     }
     if (status === "inactive" && previous === "active") {
       startPending = false
-      if (errorMessage === "" && statusError === "")
+      if (result.reason !== "")
+        showError(result.reason)
+      else if (errorMessage === "" && statusError === "")
         showError("Hotspot stopped")
       saveState()
       qrReady = false
@@ -236,7 +272,7 @@ Panel {
       return
     }
     var selectedUpstream = upstream === "auto" ? "auto" : upstream
-    clearError()
+    dismissError()
     status = "starting"
     startPending = true
     saveState()
@@ -643,6 +679,7 @@ Panel {
   }
   Timer { id: copiedTimer; interval: 1800; repeat: false; onTriggered: root.installCopied = false }
   Timer { id: errorTimer; interval: 8000; repeat: false; onTriggered: root.clearError() }
+  Timer { id: logCopiedTimer; interval: 1800; repeat: false; onTriggered: root.logCopied = false }
 
   Component.onCompleted: {
     injectBar()
@@ -939,14 +976,89 @@ Panel {
         }
       }
 
-      Text {
-        visible: !root.depsBlocked && (root.errorMessage !== "" || root.statusError !== "")
+      // Error card: a plain-language headline and next step up front, and the
+      // full diagnostic report one click away for pasting into an agent.
+      Rectangle {
+        id: errorCard
+        visible: !root.depsBlocked && root.errorInfo.title !== ""
         width: parent.width
-        text: root.errorMessage !== "" ? root.errorMessage : root.statusError
-        color: Commons.Color.urgent
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.Wrap
+        height: errorCardInner.implicitHeight + Style.space(20)
+        radius: Style.cornerRadius
+        color: Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.12)
+        border.color: Commons.Color.urgent
+        border.width: Math.max(1, Style.space(1))
+        // Entrance only: confirms the failure without jumping into place.
+        opacity: visible ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
+
+        Row {
+          id: errorCardInner
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.margins: Style.space(10)
+          spacing: Style.space(10)
+
+          Rectangle {
+            id: errorBadge
+            width: Style.space(22)
+            height: width
+            radius: width / 2
+            color: Commons.Color.urgent
+            Text {
+              anchors.centerIn: parent
+              text: "!"
+              color: Commons.Color.background
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+          }
+
+          Column {
+            width: parent.width - errorBadge.width - parent.spacing
+            spacing: Style.space(4)
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.errorInfo.title
+              color: root.foreground
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              visible: root.errorInfo.hint !== ""
+              text: root.errorInfo.hint
+              color: Commons.Color.muted
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+            Row {
+              spacing: Style.space(6)
+              topPadding: Style.space(2)
+              Button {
+                visible: root.errorInfo.hasLog
+                bordered: true
+                text: root.logCopied ? "Copied" : "Copy log"
+                tooltipText: "Copies a full diagnostic report to paste into an agent"
+                fontSize: Style.font.caption
+                onClicked: root.copyErrorLog()
+              }
+              Button {
+                text: "Dismiss"
+                fontSize: Style.font.caption
+                foreground: Commons.Color.muted
+                onClicked: root.dismissError()
+              }
+            }
+          }
+        }
       }
 
       // Recently connected devices, newest first. Backend-parsed values only.
