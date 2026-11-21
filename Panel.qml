@@ -790,18 +790,23 @@ Panel {
       Item {
         id: header
         width: parent.width
-        height: Math.max(headerIcon.implicitHeight, headerLabels.implicitHeight, toggleControl.implicitHeight)
+        height: Math.max(headerIcon.height, headerLabels.implicitHeight, toggleControl.implicitHeight)
 
-        Text {
+        // The same "spot" as the bar icon, sized to the full height of the
+        // title and status lines so it reads as their equal, not a bullet.
+        BarMark {
           id: headerIcon
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          textFormat: Text.PlainText
-          text: root.hotspotActive ? "\u{f1720}" : "\u{f1721}"
-          color: root.hotspotActive ? Commons.Color.accent : root.foreground
-          opacity: root.hotspotActive || root.busy ? 1.0 : 0.45
-          font.family: Style.font.family
-          font.pixelSize: Style.font.display
+          width: Math.round(headerLabels.implicitHeight)
+          height: width
+          mode: root.depsBlocked ? "blocked"
+            : root.hotspotActive ? "on"
+            : root.busy ? "busy" : "off"
+          clients: root.connectedCount
+          ink: root.hotspotActive || root.busy ? Commons.Color.accent : root.foreground
+          backdrop: Commons.Color.popups.background
+          opacity: root.hotspotActive || root.busy ? 1.0 : 0.55
         }
 
         // Glyphs carry their own left side bearing, larger for a big bold "O"

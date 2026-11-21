@@ -24,6 +24,8 @@ Rectangle {
   property string mode: "off"
   property int clients: 0
   property color ink: Commons.Color.foreground
+  // The surface behind the mark, used for the thin cut-out around each bead.
+  property color backdrop: Commons.Color.bar ? Commons.Color.bar.background : Commons.Color.background
 
   readonly property bool animate: Style.duration(1000) > 0
   readonly property real unit: width / 24
@@ -125,7 +127,7 @@ Rectangle {
       color: mark.ink
       // A thin cut-out in the bar colour so a bead reads apart from the ring.
       border.width: Math.max(1, mark.unit * 1.2)
-      border.color: Commons.Color.bar ? Commons.Color.bar.background : Commons.Color.background
+      border.color: mark.backdrop
       x: mark.width / 2 + Math.cos(angle) * reach - width / 2
       y: mark.height / 2 + Math.sin(angle) * reach - height / 2
     }

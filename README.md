@@ -1,4 +1,4 @@
-![Omaspot — the bar flyout showing an active hotspot, its QR code, connected devices and network settings](assets/omaspot.png)
+![Omaspot — an Omarchy bar plugin for a mobile Wi-Fi hotspot, shown beside its flyout with a QR code, connected devices and network settings](assets/banner.png)
 
 # Omaspot
 
@@ -10,10 +10,17 @@ Omarchy shell's native theme and panel conventions.
 Features:
 
 - One-click hotspot toggle from the Omarchy bar
-- Live status and useful error notifications
+- A bar icon of its own, "the spot", that shows off, starting, and
+  broadcasting at a glance, with a bead for each connected device
 - QR code that appears while the hotspot is active
 - List of recently connected clients, with the currently associated ones marked
-- Auto-detected Wi-Fi and upstream interfaces
+- Plain-language error messages with a next step, and **Copy log** for a full
+  diagnostic report to paste into an issue or an agent
+- Detects a hotspot that died during suspend, cleans it up, and says so
+  instead of showing it as still active
+- Spots leftover `hostapd`/`dnsmasq` from a crashed `create_ap` and names
+  the processes to clear before they block a new hotspot
+- Auto-detected Wi-Fi interface and internet source
 - 2.4 GHz and 5 GHz band selection
 - Automatic or manual channel selection
 - Persistent per-user settings stored outside the plugin checkout
@@ -176,6 +183,11 @@ bash -n backend/omaspotctl
 
 The backend exposes the small protocol used by the QML panel:
 `status`, `interfaces`, `deps`, `doctor`, `clients`, `start`, `stop`, and `qr`.
+
+Errors reach the panel as `title||hint`. When a failure comes from
+`create_ap`, the diagnostic report behind **Copy log** travels with it: on
+`start`'s stdout, or after the status line on the one `status` poll that
+noticed the hotspot went away. It is never written to disk.
 
 `clients` is read-only and never escalates: it reports the tab-separated
 `mac`, `ip`, `hostname`, `state` of each client it finds, newest lease first.
