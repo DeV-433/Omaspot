@@ -44,6 +44,11 @@ Omarchy already supplies the supporting system tools, QR encoder, and
 `wl-clipboard` used for clipboard copy and paste. The package manager resolves
 the hotspot package's own dependencies during installation.
 
+When the hotspot shares the Wi-Fi network its own card is connected to, most
+cards can only host on that network's channel. With the channel on Auto,
+Omaspot follows the connected network's band and channel instead of the band
+setting, and the panel shows the band and channel actually in use.
+
 Omaspot enables 802.11n on both bands and requests 802.11ac with an 80 MHz
 channel width on 5 GHz. The adapter, connected Wi-Fi channel, and regulatory
 domain may limit the negotiated mode or width.

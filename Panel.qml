@@ -21,6 +21,9 @@ Panel {
   property var hostWidget: null
   property string status: "inactive"
   property string hotspotInterface: ""
+  // What the running AP really uses (empty while off or unknown).
+  property string liveBand: ""
+  property string liveChannel: ""
   property string statusError: ""
   property real lastStatusTickMs: 0
   property string errorMessage: ""
@@ -43,7 +46,8 @@ Panel {
   // title / hint / whether a full log can be copied.
   readonly property string activeError: errorMessage !== "" ? errorMessage : statusError
   readonly property var errorInfo: Model.parseError(activeError)
-  readonly property string bandLabel: band === "5" ? "5 GHz" : "2.4 GHz"
+  readonly property string shownBand: hotspotActive && liveBand !== "" ? liveBand : band
+  readonly property string bandLabel: shownBand === "5" ? "5 GHz" : "2.4 GHz"
   readonly property int connectedCount: {
     var n = 0
     for (var i = 0; i < connectedDevices.length; i++) if (connectedDevices[i].connected) n++
@@ -56,7 +60,8 @@ Panel {
     : "Off · Personal Wi-Fi hotspot"
   readonly property var cardChips: [
     bandLabel,
-    channelMode === "manual" ? "Channel " + channel : "Auto channel",
+    hotspotActive && liveChannel !== "" ? "Channel " + liveChannel
+      : channelMode === "manual" ? "Channel " + channel : "Auto channel",
     hotspotActive && hotspotInterface !== "" ? "via " + hotspotInterface
       : upstream === "auto" ? "Auto source" : "via " + upstream
   ]
@@ -267,6 +272,8 @@ Panel {
     // Sent only on the poll that noticed the hotspot went away.
     if (result.reason !== "") showError(result.reason, result.report)
     hotspotInterface = result.hotspotInterface
+    liveBand = result.liveBand
+    liveChannel = result.liveChannel
     if (result.upstream !== "" && upstream === "auto") upstream = result.upstream
     if (previous !== status && status === "active") {
       startPending = false

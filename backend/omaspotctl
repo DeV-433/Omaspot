@@ -501,6 +501,26 @@ reap_dead_instance() {
   return 0
 }
 
+# Band of the network iface is connected to as a client: 2.4 or 5. Fails when
+# it is not connected (or on 6 GHz, which create_ap cannot host).
+station_band() {
+  local freq
+  command -v iw >/dev/null 2>&1 || return 1
+  freq="$(iw dev "$1" link 2>/dev/null | awk '$1 == "freq:" { print int($2); exit }')"
+  case "$freq" in '' | *[!0-9]*) return 1 ;; esac
+  if [ "$freq" -lt 3000 ]; then printf '2.4'
+  elif [ "$freq" -lt 5925 ]; then printf '5'
+  else return 1
+  fi
+}
+
+# Channel and frequency (MHz) the running AP actually transmits on, as
+# "<channel>\t<freq>", so the panel shows the real band rather than the setting.
+ap_channel() {
+  command -v iw >/dev/null 2>&1 || return 0
+  iw dev "$1" info 2>/dev/null | awk '$1 == "channel" { gsub(/\(/, "", $3); printf "%s\t%d", $2, $3; exit }'
+}
+
 interfaces() {
   need nmcli
   nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>/dev/null \
@@ -535,7 +555,7 @@ classify_failure() {
       FAIL_HINT="Its driver does not support access point mode." ;;
     *"station (i.e. be connected) and an AP at the same time"* | *"can only run an access point on the channel it is already"*)
       FAIL_TITLE="Wi-Fi is busy on another channel"
-      FAIL_HINT="Disconnect from your Wi-Fi network or set the channel to Auto, then try again." ;;
+      FAIL_HINT="This Wi-Fi card can only host on the channel of the network it's connected to. Set the channel to Auto, or disconnect from Wi-Fi." ;;
     *"can not transmit to channel"* | *"Could not set channel"* | *"not allowed"*)
       FAIL_TITLE="That channel isn't allowed here"
       FAIL_HINT="Set the channel to Auto, or switch to 2.4 GHz, then try again." ;;
@@ -607,7 +627,7 @@ running_record() {
     if ! instance_link_dead; then
       record_instance "$INST_PID" "$INST_IFACE" "$INST_STARTTIME" "$INST_CONF" \
         "$(instance_suspends "$INST_PID" "$INST_STARTTIME")"
-      printf 'active\t%s\t%s\t\n' "$INST_IFACE" "$INST_PID"
+      printf 'active\t%s\t%s\t\t\t%s\n' "$INST_IFACE" "$INST_PID" "$(ap_channel "$INST_IFACE")"
       return 0
     fi
     # The processes are alive but the AP is not (typically after a suspend).
@@ -707,6 +727,14 @@ start_create_ap() {
   case "$channel_mode" in auto|manual) ;; *) die "Invalid channel mode" ;; esac
   if [ "$channel_mode" = manual ]; then
     valid_channel_for_band "$band" "$channel" || die "Invalid Wi-Fi channel for the selected band"
+  fi
+
+  # Sharing Wi-Fi over Wi-Fi: most cards host the AP only on the channel their
+  # own connection already uses. create_ap follows that channel on Auto, but
+  # only within the requested band, so on Auto request the connection's band.
+  if [ "$channel_mode" = auto ]; then
+    local link_band
+    link_band="$(station_band "$wifi")" && band="$link_band"
   fi
 
   if discover_instance; then

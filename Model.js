@@ -42,6 +42,10 @@ function parseStatus(raw) {
     state: fields[0] === "active" ? "active" : "inactive",
     hotspotInterface: fields[1] || "",
     upstream: fields[3] || "",
+    // The running AP's real channel and frequency, which can differ from the
+    // saved band when it follows the Wi-Fi network it shares.
+    liveChannel: /^[0-9]+$/.test(fields[5] || "") ? fields[5] : "",
+    liveBand: /^[0-9]+$/.test(fields[6] || "") ? (Number(fields[6]) < 3000 ? "2.4" : "5") : "",
     // Why the hotspot went away; only present on the poll that noticed it.
     reason: String(fields[4] || "").replace(/^omaspot:\s*/i, "").trim(),
     // On that same poll, the diagnostic report follows the status line.
