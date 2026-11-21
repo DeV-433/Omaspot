@@ -109,7 +109,9 @@ Panel {
   readonly property string statusLabel: status === "active" ? "Active"
     : status === "starting" ? "Starting…"
     : status === "stopping" ? "Stopping…" : "Inactive"
-  readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
+  // The flyout sits on the popup surface, not the bar. The bar's text color can
+  // be dark (a transparent bar over a light wallpaper), which vanishes here.
+  readonly property color foreground: Commons.Color.popups.text
   readonly property color statusColor: status === "active" ? Commons.Color.accent
     : (status === "starting" || status === "stopping") ? Commons.Color.accent
     : statusError !== "" || errorMessage !== "" ? Commons.Color.urgent : Commons.Color.muted
