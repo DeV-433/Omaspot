@@ -574,6 +574,12 @@ classify_failure() {
     *"Failed to initialize lock"* | *"Failed to lock mutex"*)
       FAIL_TITLE="Another hotspot operation is still running"
       FAIL_HINT="Wait a few seconds and try again." ;;
+    *"dnsmasq: command not found"* | *"dnsmasq not found"*)
+      FAIL_TITLE="dnsmasq is missing"
+      FAIL_HINT="It gives connected devices their addresses. Install it with: yay -S --needed dnsmasq" ;;
+    *"iptables: command not found"* | *"iptables not found"*)
+      FAIL_TITLE="iptables is missing"
+      FAIL_HINT="It shares your internet with connected devices. Install it with: yay -S --needed iptables" ;;
     *"hostapd not found"*)
       FAIL_TITLE="hostapd is missing"
       FAIL_HINT="Reinstall linux-wifi-hotspot to bring it back." ;;
@@ -1061,7 +1067,7 @@ qr() {
 
 deps() {
   local item found=1
-  for item in create_ap nmcli qrencode pkexec; do
+  for item in create_ap dnsmasq iptables nmcli qrencode pkexec; do
     if command -v "$item" >/dev/null 2>&1; then
       printf 'ok\t%s\n' "$item"
     else
@@ -1072,11 +1078,14 @@ deps() {
   [ "$found" -eq 1 ]
 }
 
-# On a standard Omarchy installation, this is the one package the user needs
-# to add for Omaspot. Omarchy supplies the supporting tools and utilities.
+# The packages a standard Omarchy installation may lack. linux-wifi-hotspot
+# lists dnsmasq and iptables only as optional, but Omaspot always shares with
+# NAT, which needs both: without dnsmasq create_ap fails halfway through start.
 # Format: command|package|level|install command.
 DEP_SPECS=(
   'create_ap|linux-wifi-hotspot|blocking|yay -S --needed linux-wifi-hotspot'
+  'dnsmasq|dnsmasq|blocking|yay -S --needed dnsmasq'
+  'iptables|iptables|blocking|yay -S --needed iptables'
 )
 
 # Reports whether the hotspot backend is available and supplies its install
