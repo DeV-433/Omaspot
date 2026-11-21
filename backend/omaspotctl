@@ -45,6 +45,10 @@ DOWN_FILE="$RUN_DIR/link-down"
 # "<pid> <starttime>" of the dead instance we already asked to stop, so a
 # failing stop is not retried through pkexec on every status poll.
 REAP_FILE="$RUN_DIR/reaped"
+# Present once a status poll has reaped a dead instance and told the panel why.
+# Whatever create_ap printed while being torn down is then already accounted
+# for, and must not be reported a second time as an unexpected stop.
+REPORTED_FILE="$RUN_DIR/reported"
 # Successful system suspends since boot. An AP that lost carrier after the
 # count moved did not survive the suspend, so it is dead rather than flapping.
 SUSPEND_STATS=/sys/power/suspend_stats/success
@@ -489,6 +493,10 @@ reap_dead_instance() {
   done
   pid_is_create_ap "$pid" >/dev/null 2>&1 && return 1
   rm -f -- "$DOWN_FILE" 2>/dev/null || true
+  ( umask 077; : >"$REPORTED_FILE" ) 2>/dev/null || true
+  # With no holder left to collect create_ap's exit, its teardown output would
+  # sit in the log and the next poll would call it an unexpected stop.
+  holder_alive || : > "$LOG_FILE" 2>/dev/null || true
   clear_record
   return 0
 }
@@ -624,6 +632,15 @@ running_record() {
 
   # create_ap exited on its own (a clean stop empties the log first), so
   # whatever it last printed is why the hotspot is gone.
+  # The stop was already reported by the poll that reaped it.
+  if [ -f "$REPORTED_FILE" ]; then
+    rm -f -- "$REPORTED_FILE" 2>/dev/null || true
+    : > "$LOG_FILE" 2>/dev/null || true
+    clear_record
+    print_inactive
+    return 0
+  fi
+
   if [ -r "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
     log_tail="$(tr -d '\000' <"$LOG_FILE" 2>/dev/null || true)"
     classify_failure "$log_tail" "The hotspot stopped unexpectedly"
@@ -716,6 +733,7 @@ start_create_ap() {
   holder_alive && die "A hotspot start is already in progress"
   : > "$LOG_FILE"
   chmod 0600 "$LOG_FILE"
+  rm -f -- "$REPORTED_FILE" 2>/dev/null || true
   local my_starttime
   my_starttime="$(proc_starttime "$$")" || die "Cannot read own process start time"
   ( umask 077; printf '%s %s\n' "$$" "$my_starttime" >"$HOLDER_FILE" ) || die "Cannot write $HOLDER_FILE"
@@ -781,7 +799,10 @@ start_create_ap() {
   # create_ap exits 0 after a clean stop (SIGUSR1 from `create_ap --stop`),
   # and non-zero when it fails; pkexec propagates the code. So the exit
   # status alone separates a deliberate shutdown from a real failure.
-  if [ "$rc" -eq 0 ]; then
+  # A status poll that found this instance dead and stopped it has already
+  # told the panel why, so its exit is not a second failure either.
+  if [ "$rc" -eq 0 ] || [ -f "$REPORTED_FILE" ]; then
+    rm -f -- "$REPORTED_FILE" 2>/dev/null || true
     : > "$LOG_FILE" 2>/dev/null || true
     return 0
   fi
