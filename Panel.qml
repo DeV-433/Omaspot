@@ -1530,6 +1530,9 @@ Panel {
             spacing: Style.space(4)
             TextField {
               font.pixelSize: root.fontBody
+              // The kit spaces masked dots from font.pixelSize, which reads the
+              // font it is writing and loops; same spacing, from the source size.
+              font.letterSpacing: !root.passwordVisible && text.length > 0 ? Math.round(root.fontBody * 0.25) : 0
               id: passwordField
               enabled: root.opened && root.settingsEditable
               readOnly: true
