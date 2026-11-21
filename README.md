@@ -115,7 +115,7 @@ A fresh installation starts with these safe, generic defaults:
 - Security key: `omaspot123` — change this before sharing the network
 - Band: `2.4 GHz`
 - Channel: automatic
-- Upstream interface: automatic detection
+- Internet source: automatic detection
 
 The repository contains no machine-specific SSID, password, interface, or
 state file. Once you edit settings, Omaspot stores them locally at:
@@ -129,11 +129,23 @@ plugin installer.
 
 ## Use
 
-Click the Omaspot icon in the bar to open the panel. Choose the upstream
-interface, band, and channel policy if needed, update the hotspot name and
+Click the Omaspot icon in the bar to open the panel. Choose the internet
+source, band, and channel policy if needed, update the hotspot name and
 security key, then use the switch. The QR code is generated only while the
 hotspot is active. While it is active, the panel also lists the clients that
 have joined most recently; the list scrolls rather than growing the flyout.
+
+The bar icon shows the hotspot's state at a glance: a hollow spot when it is
+off, a breathing spot while it starts or stops, and a spot rippling out to its
+ring while it broadcasts, with a small bead orbiting the ring for each
+connected device.
+
+When something fails, the panel shows what went wrong and what to try next.
+Failures reported by `create_ap` also offer **Copy log**, which puts a full
+diagnostic report on the clipboard (passphrase redacted), ready to paste into
+an issue or an agent. The report is held in memory only and is gone after the
+next action or a shell restart. A hotspot that dies during suspend is noticed,
+cleaned up, and reported as stopped.
 
 If another application already started `create_ap`, Omaspot detects it and
 can stop it through the same backend. It also loads `/etc/create_ap.conf` when

@@ -35,23 +35,25 @@ function parseState(raw) {
 }
 
 function parseStatus(raw) {
-  var line = String(raw || "").trim().split(/\r?\n/)[0] || "inactive"
+  var lines = String(raw || "").trim().split(/\r?\n/)
+  var line = lines[0] || "inactive"
   var fields = line.split("\t")
   return {
     state: fields[0] === "active" ? "active" : "inactive",
     hotspotInterface: fields[1] || "",
     upstream: fields[3] || "",
     // Why the hotspot went away; only present on the poll that noticed it.
-    reason: String(fields[4] || "").replace(/^omaspot:\s*/i, "").trim()
+    reason: String(fields[4] || "").replace(/^omaspot:\s*/i, "").trim(),
+    // On that same poll, the diagnostic report follows the status line.
+    report: lines.slice(1).join("\n").trim()
   }
 }
 
-// Backend errors arrive as "title||hint||log" (see fmt_error in omaspotctl):
-// a short headline, an optional next step, and "log" when a full report can be
-// copied with `omaspotctl lastlog`. Anything without "||" is a bare title.
+// Backend errors arrive as "title||hint" (see fmt_error in omaspotctl): a short
+// headline and an optional next step. Anything without "||" is a bare title.
 function parseError(raw) {
   var text = String(raw || "").trim()
-  if (text === "") return { title: "", hint: "", hasLog: false }
+  if (text === "") return { title: "", hint: "" }
   // stderr can carry stray lines (shell warnings) around the real message;
   // prefer the last line in the structured format when there is one.
   var lines = text.split(/\r?\n/)
@@ -59,12 +61,11 @@ function parseError(raw) {
     if (lines[i].indexOf("||") >= 0) { text = lines[i]; break }
   }
   text = text.trim().replace(/^omaspot:\s*/i, "")
-  if (text.indexOf("||") < 0) return { title: text, hint: "", hasLog: false }
+  if (text.indexOf("||") < 0) return { title: text, hint: "" }
   var parts = text.split("||")
   return {
     title: String(parts[0] || "").trim(),
-    hint: String(parts[1] || "").trim(),
-    hasLog: String(parts[2] || "").trim() === "log"
+    hint: String(parts[1] || "").trim()
   }
 }
 

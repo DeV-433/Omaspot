@@ -27,14 +27,52 @@ Panel {
   // Why the last hotspot stopped on its own (suspend, link loss, create_ap
   // exiting). Unlike errorMessage it does not time out, so it is still there
   // when the panel is opened long after the fact; the next start clears it.
-  property string stopReason: ""
+  // Diagnostic report for the error on screen, straight from the backend's
+  // output. Kept in memory only: the next error or a shell restart drops it.
+  property string errorReport: ""
   property bool logCopied: false
+  // A failed start reports through three signals in no fixed order (exit,
+  // stdout report, stderr headline); finishStart() waits for all of them.
+  property string startReport: ""
+  property string startStderr: ""
+  property int startExitCode: 0
+  property bool startExited: false
+  property bool startOutDone: false
+  property bool startErrDone: false
   // The one error the card shows, most immediate first, already split into
   // title / hint / whether a full log can be copied.
-  readonly property string activeError: errorMessage !== "" ? errorMessage
-    : statusError !== "" ? statusError
-    : !hotspotActive && !busy ? stopReason : ""
+  readonly property string activeError: errorMessage !== "" ? errorMessage : statusError
   readonly property var errorInfo: Model.parseError(activeError)
+  readonly property string bandLabel: band === "5" ? "5 GHz" : "2.4 GHz"
+  readonly property int connectedCount: {
+    var n = 0
+    for (var i = 0; i < connectedDevices.length; i++) if (connectedDevices[i].connected) n++
+    return n
+  }
+  readonly property string heroMeta: depsBlocked ? "Hotspot support is not installed"
+    : status === "starting" ? "Starting…"
+    : status === "stopping" ? "Stopping…"
+    : hotspotActive ? (connectedCount === 1 ? "On · 1 device connected" : "On · " + connectedCount + " devices connected")
+    : "Off · Personal Wi-Fi hotspot"
+  readonly property var cardChips: [
+    bandLabel,
+    channelMode === "manual" ? "Channel " + channel : "Auto channel",
+    hotspotActive && hotspotInterface !== "" ? "via " + hotspotInterface
+      : upstream === "auto" ? "Auto source" : "via " + upstream
+  ]
+  readonly property real settingsLabelWidth: Style.space(64)
+  // The flyout's type runs one step above the kit defaults; the headline a
+  // little more. Kit components that take a size get these passed in.
+  readonly property int fontStep: 1
+  readonly property int fontCaption: Style.font.caption + fontStep
+  readonly property int fontBodySmall: Style.font.bodySmall + fontStep
+  readonly property int fontBody: Style.font.body + fontStep
+  readonly property int fontSubtitle: Style.font.subtitle + fontStep
+  readonly property int fontHeadline: Style.font.title + 3
+  // Field labels match the kit's Dropdown label; hairline is a quiet rule
+  // that does not compete with the theme's (often bright) popup border.
+  readonly property color labelColor: Qt.darker(foreground, 1.4)
+  readonly property color hairline: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.12)
   property string ssid: "Omaspot"
   property string password: "omaspot123"
   property string band: "2.4"
@@ -74,7 +112,7 @@ Panel {
   readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
   readonly property color statusColor: status === "active" ? Commons.Color.accent
     : (status === "starting" || status === "stopping") ? Commons.Color.accent
-    : statusError !== "" || errorMessage !== "" || stopReason !== "" ? Commons.Color.urgent : Commons.Color.muted
+    : statusError !== "" || errorMessage !== "" ? Commons.Color.urgent : Commons.Color.muted
 
   function open() {
     root.controller.show()
@@ -120,39 +158,48 @@ Panel {
     stateFile.setText(JSON.stringify(state, null, 2) + "\n")
   }
 
-  function showError(message) {
+  // report: the backend's diagnostic report for this error, if it sent one.
+  function showError(message, report) {
     var clean = String(message || "").replace(/^omaspot:\s*/i, "").trim()
     if (clean === "") clean = "The hotspot operation failed"
     var info = Model.parseError(clean)
     errorMessage = clean
+    errorReport = String(report || "").trim()
     logCopied = false
     var body = info.hint !== "" ? info.title + "\n" + info.hint : info.title
-    if (info.hasLog) body += "\nOpen Omaspot to copy the log."
+    if (errorReport !== "") body += "\nOpen Omaspot to copy the log."
     notifyProc.command = ["notify-send", "--expire-time=15000", "--urgency=normal", "--app-name=Omaspot", "Omaspot", body]
     notifyProc.running = true
-    // An error with a log stays until dismissed or the next start, so it is
-    // still there to copy when the panel is opened later.
-    if (info.hasLog) errorTimer.stop()
+    // An error with a log stays until dismissed or the next action, so it is
+    // still there to copy when the panel is opened later in this session.
+    if (errorReport !== "") errorTimer.stop()
     else errorTimer.restart()
   }
 
   function clearError() {
     errorMessage = ""
     statusError = ""
-  }
-
-  function dismissError() {
-    clearError()
-    stopReason = ""
+    errorReport = ""
     logCopied = false
   }
 
-  // The report is read by the backend at copy time, never held in QML, and
-  // goes straight to the clipboard for pasting into a chat or an agent.
+  // Passed as an argument, not through a shell, so the report is never
+  // re-parsed; "--" keeps a leading dash from reading as an option.
   function copyErrorLog() {
-    Quickshell.execDetached(["bash", "-c", Util.shellQuote(backendPath) + " lastlog | wl-copy"])
+    if (errorReport === "") return
+    Quickshell.execDetached(["wl-copy", "--", errorReport])
     logCopied = true
     logCopiedTimer.restart()
+  }
+
+  function finishStart(force) {
+    if (!startExited) return
+    if (!force && !(startOutDone && startErrDone)) return
+    startExited = false
+    startFinishTimer.stop()
+    showError(startStderr !== "" ? startStderr
+      : startExitCode === 126 ? "Polkit authorization was cancelled" : "Could not start the hotspot",
+      startReport)
   }
 
   function refreshStatus() {
@@ -214,22 +261,20 @@ Panel {
     var result = Model.parseStatus(raw)
     var previous = status
     if (startPending && result.state === "inactive") return
-    if (result.reason !== "") stopReason = result.reason
     status = result.state
+    // Sent only on the poll that noticed the hotspot went away.
+    if (result.reason !== "") showError(result.reason, result.report)
     hotspotInterface = result.hotspotInterface
     if (result.upstream !== "" && upstream === "auto") upstream = result.upstream
     if (previous !== status && status === "active") {
       startPending = false
-      stopReason = ""
       saveState()
       scheduleQr()
       refreshClients()
     }
     if (status === "inactive" && previous === "active") {
       startPending = false
-      if (result.reason !== "")
-        showError(result.reason)
-      else if (errorMessage === "" && statusError === "")
+      if (result.reason === "" && errorMessage === "" && statusError === "")
         showError("Hotspot stopped")
       saveState()
       qrReady = false
@@ -238,7 +283,7 @@ Panel {
       connectedDevices = []
     }
     if (status === "inactive" && (previous === "stopping" || previous === "starting")) {
-      if (previous === "starting" && errorMessage === "" && statusError === "")
+      if (previous === "starting" && result.reason === "" && errorMessage === "" && statusError === "")
         showError("The hotspot exited before becoming active")
       saveState()
     }
@@ -272,7 +317,12 @@ Panel {
       return
     }
     var selectedUpstream = upstream === "auto" ? "auto" : upstream
-    dismissError()
+    clearError()
+    startReport = ""
+    startStderr = ""
+    startExited = false
+    startOutDone = false
+    startErrDone = false
     status = "starting"
     startPending = true
     saveState()
@@ -558,10 +608,22 @@ Panel {
   Process {
     id: startProc
     stdinEnabled: true
-    stdout: StdioCollector { waitForEnd: true }
+    // stdout carries the diagnostic report on failure, stderr the headline.
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.startReport = String(text || "").trim()
+        root.startOutDone = true
+        root.finishStart(false)
+      }
+    }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text && String(text).trim() !== "") root.errorMessage = String(text).trim()
+      onStreamFinished: {
+        root.startStderr = String(text || "").trim()
+        root.startErrDone = true
+        root.finishStart(false)
+      }
     }
     onStarted: {
       // omaspotctl reads credentials from stdin so they never appear in the
@@ -573,7 +635,11 @@ Panel {
       if (code !== 0) {
         root.startPending = false
         root.status = "inactive"
-        root.showError(root.errorMessage || (code === 126 ? "Polkit authorization was cancelled" : "Could not start the hotspot"))
+        root.startExitCode = code
+        root.startExited = true
+        root.finishStart(false)
+        // Never wait forever on a stream that does not report its end.
+        if (root.startExited) startFinishTimer.restart()
       } else if (root.startPending) {
         root.startPending = false
         root.status = "inactive"
@@ -680,6 +746,7 @@ Panel {
   Timer { id: copiedTimer; interval: 1800; repeat: false; onTriggered: root.installCopied = false }
   Timer { id: errorTimer; interval: 8000; repeat: false; onTriggered: root.clearError() }
   Timer { id: logCopiedTimer; interval: 1800; repeat: false; onTriggered: root.logCopied = false }
+  Timer { id: startFinishTimer; interval: 1500; repeat: false; onTriggered: root.finishStart(true) }
 
   Component.onCompleted: {
     injectBar()
@@ -699,8 +766,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    // Match the built-in network panel's 380px fitted width.
-    contentWidth: panel.fittedContentWidth(Style.space(380))
+    // A touch wider than the built-in network panel's 380px, for the
+    // larger type and the QR card beside its details.
+    contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -714,35 +782,77 @@ Panel {
     Column {
       id: content
       width: parent.width
-      spacing: Style.space(10)
+      spacing: Style.space(12)
 
-      Row {
+      // Header: icon, name, live status and the on/off switch. Hand-built in
+      // the shape of the kit's PanelHero so the two text lines can share one
+      // exact left edge and take the flyout's larger type.
+      Item {
+        id: header
         width: parent.width
-        spacing: Style.space(10)
+        height: Math.max(headerIcon.implicitHeight, headerLabels.implicitHeight, toggleControl.implicitHeight)
+
+        Text {
+          id: headerIcon
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: root.hotspotActive ? "\u{f1720}" : "\u{f1721}"
+          color: root.hotspotActive ? Commons.Color.accent : root.foreground
+          opacity: root.hotspotActive || root.busy ? 1.0 : 0.45
+          font.family: Style.font.family
+          font.pixelSize: Style.font.display
+        }
+
+        // Glyphs carry their own left side bearing, larger for a big bold "O"
+        // than for small caps, which is what pushed the title right of the
+        // status line. Shift the title by the difference so their ink lines up.
+        FontMetrics { id: titleMetrics; font: headerTitle.font }
+        FontMetrics { id: metaMetrics; font: headerMeta.font }
 
         Column {
-          width: parent.width - toggleControl.width - Style.space(10)
+          id: headerLabels
+          anchors.left: headerIcon.right
+          anchors.leftMargin: Style.space(14)
+          anchors.right: toggleControl.left
+          anchors.rightMargin: Style.space(12)
+          anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(2)
+
           Text {
-            text: "Omaspot"
+            id: headerTitle
+            // tightBoundingRect(x) of a single glyph is its left bearing.
+            x: Math.round(metaMetrics.tightBoundingRect(headerMeta.text.charAt(0)).x
+              - titleMetrics.tightBoundingRect(text.charAt(0)).x)
+            width: parent.width - x
+            textFormat: Text.PlainText
+            text: "OMASPOT"
             color: root.foreground
+            elide: Text.ElideRight
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.title
+            font.pixelSize: root.fontHeadline
             font.bold: true
+            font.letterSpacing: 0.6
           }
           Text {
-            text: root.depsBlocked
-              ? "Hotspot support is not installed"
-              : root.hotspotInterface !== "" ? "Sharing via " + root.hotspotInterface : "Personal Wi-Fi hotspot"
-            color: root.depsBlocked ? Commons.Color.urgent : Commons.Color.muted
+            id: headerMeta
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.heroMeta.toUpperCase()
+            color: root.labelColor
+            elide: Text.ElideRight
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
+            font.pixelSize: root.fontCaption
+            font.bold: true
+            font.letterSpacing: 1.2
           }
         }
 
         ToggleSwitch {
           id: toggleControl
+          anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
+          visible: !root.depsBlocked
           // A hotspot cannot be started without create_ap, so do not offer it.
           checked: root.hotspotActive || root.status === "starting"
           busy: root.busy
@@ -760,8 +870,8 @@ Panel {
         width: parent.width
         height: installCardInner.implicitHeight + Style.space(24)
         radius: Style.cornerRadius
-        color: Commons.Color.background
-        border.color: Commons.Color.popups.border
+        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
+        border.color: root.hairline
         border.width: Math.max(1, Style.space(1))
         visible: root.depsBlocked
 
@@ -779,7 +889,7 @@ Panel {
             color: root.foreground
             wrapMode: Text.Wrap
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.body
+            font.pixelSize: root.fontBody
             font.bold: true
           }
 
@@ -795,7 +905,7 @@ Panel {
                 text: "•"
                 color: Commons.Color.urgent
                 font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.fontBodySmall
               }
               Text {
                 width: parent.width - Style.space(10) - parent.spacing
@@ -803,7 +913,7 @@ Panel {
                 color: root.foreground
                 elide: Text.ElideRight
                 font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.fontBodySmall
               }
             }
           }
@@ -815,7 +925,7 @@ Panel {
             color: Commons.Color.muted
             wrapMode: Text.Wrap
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
+            font.pixelSize: root.fontCaption
           }
 
           Rectangle {
@@ -836,10 +946,11 @@ Panel {
               color: root.foreground
               elide: Text.ElideRight
               font.family: "monospace"
-              font.pixelSize: Style.font.caption
+              font.pixelSize: root.fontCaption
             }
 
             Button {
+              fontSize: root.fontBody
               id: copyInstall
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
@@ -854,6 +965,7 @@ Panel {
             spacing: Style.space(8)
 
             Button {
+              fontSize: root.fontBody
               id: recheckButton
               text: "Re-check"
               onClicked: {
@@ -868,196 +980,258 @@ Panel {
               color: Commons.Color.muted
               wrapMode: Text.Wrap
               font.family: Style.font.family
-              font.pixelSize: Style.font.caption
+              font.pixelSize: root.fontCaption
             }
           }
         }
       }
 
-      Row {
-        visible: !root.depsBlocked
-        width: parent.width
-        spacing: Style.space(10)
-        Text {
-          text: "●  " + root.statusLabel
-          color: root.statusColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
-        }
-        Text {
-          visible: root.hotspotActive && root.upstream !== "auto"
-          text: "·  route " + root.upstream
-          color: Commons.Color.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-        }
-      }
-
+      // Hotspot card: the QR tile beside the network it joins. While the
+      // hotspot is off the tile is a quiet placeholder rather than a fake code.
       Rectangle {
+        id: hotspotCard
         visible: !root.depsBlocked
         width: parent.width
-        height: Style.space(220)
+        height: Math.max(qrTile.height, cardInfo.implicitHeight) + Style.space(24)
         radius: Style.cornerRadius
-        color: Commons.Color.background
-        border.color: Commons.Color.popups.border
+        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
+        border.color: root.hotspotActive
+          ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.45)
+          : root.hairline
         border.width: Math.max(1, Style.space(1))
+        Behavior on border.color { ColorAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
 
         Rectangle {
-          id: qrCanvas
-          anchors.centerIn: parent
-          width: root.qrReady && root.qrSize > 0 ? root.qrSize * moduleSize : Style.space(220)
+          id: qrTile
+          anchors.left: parent.left
+          anchors.top: parent.top
+          anchors.margins: Style.space(12)
+          width: Style.space(168)
           height: width
-          color: "white"
           radius: Style.cornerRadius
-          property int moduleSize: root.qrReady && root.qrSize > 0
-            ? Math.max(3, Math.floor(Style.space(220) / root.qrSize)) : 0
-          visible: root.hotspotActive && root.qrReady
+          color: root.hotspotActive && root.qrReady
+            ? "white"
+            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
 
-          Grid {
+          Rectangle {
+            id: qrCanvas
             anchors.centerIn: parent
-            columns: root.qrSize
-            Repeater {
-              model: root.qrSize * root.qrSize
-              Rectangle {
-                required property int index
-                readonly property int row: Math.floor(index / root.qrSize)
-                readonly property int column: index % root.qrSize
-                width: qrCanvas.moduleSize
-                height: qrCanvas.moduleSize
-                color: root.qrRows[row] && root.qrRows[row].charAt(column) === "1" ? "#111111" : "transparent"
+            property int moduleSize: root.qrReady && root.qrSize > 0
+              ? Math.max(3, Math.floor((qrTile.width - Style.space(16)) / root.qrSize)) : 0
+            width: root.qrSize * moduleSize
+            height: width
+            color: "white"
+            visible: root.hotspotActive && root.qrReady
+            opacity: visible ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
+
+            Grid {
+              anchors.centerIn: parent
+              columns: root.qrSize
+              Repeater {
+                model: root.qrSize * root.qrSize
+                Rectangle {
+                  required property int index
+                  readonly property int row: Math.floor(index / root.qrSize)
+                  readonly property int column: index % root.qrSize
+                  width: qrCanvas.moduleSize
+                  height: qrCanvas.moduleSize
+                  color: root.qrRows[row] && root.qrRows[row].charAt(column) === "1" ? "#111111" : "transparent"
+                }
               }
             }
           }
-        }
 
-        // A soft, low-detail placeholder keeps the panel height stable while
-        // the hotspot is off. The overlay intentionally obscures credentials.
-        Rectangle {
-          anchors.fill: parent
-          radius: parent.radius
-          color: Commons.Color.background
-          opacity: root.hotspotActive && root.qrReady ? 0 : 0.82
-          Behavior on opacity { NumberAnimation { duration: 140 } }
-        }
-        Grid {
-          anchors.centerIn: parent
-          columns: 13
-          opacity: root.hotspotActive && root.qrReady ? 0 : 0.13
-          Repeater {
-            model: 169
-            Rectangle {
-              required property int index
-              width: Style.space(10)
-              height: width
-              color: (index * 17) % 5 < 2 ? Commons.Color.accent : Commons.Color.foreground
+          Column {
+            anchors.centerIn: parent
+            spacing: Style.space(6)
+            visible: !(root.hotspotActive && root.qrReady)
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              textFormat: Text.PlainText
+              text: "\u{f0432}"
+              color: root.foreground
+              opacity: root.busy || root.hotspotActive ? 0.55 : 0.22
+              font.family: Style.font.family
+              font.pixelSize: Style.font.display * 1.6
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              textFormat: Text.PlainText
+              text: root.hotspotActive ? "Generating…" : root.busy ? root.statusLabel : "Off"
+              color: Commons.Color.muted
+              font.family: Style.font.family
+              font.pixelSize: root.fontCaption
             }
           }
         }
+
         Column {
-          anchors.centerIn: parent
-          spacing: Style.space(4)
-          visible: !(root.hotspotActive && root.qrReady)
-          Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: root.hotspotActive ? "Generating QR…" : "Hotspot off"
-            color: root.foreground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body
-            font.bold: true
+          id: cardInfo
+          anchors.left: qrTile.right
+          anchors.leftMargin: Style.space(14)
+          anchors.right: parent.right
+          anchors.rightMargin: Style.space(12)
+          anchors.verticalCenter: qrTile.verticalCenter
+          spacing: Style.space(10)
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+            PanelSectionHeader {
+              fontSize: root.fontCaption
+              text: "Network"
+              foreground: root.foreground
+            }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: root.ssid !== "" ? root.ssid : "Omaspot"
+              color: root.foreground
+              elide: Text.ElideRight
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: root.fontSubtitle
+              font.bold: true
+            }
           }
+
+          Flow {
+            width: parent.width
+            spacing: Style.space(6)
+            Repeater {
+              model: root.cardChips
+              Rectangle {
+                required property var modelData
+                width: chipText.implicitWidth + Style.space(14)
+                height: chipText.implicitHeight + Style.space(6)
+                radius: height / 2
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                Text {
+                  id: chipText
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: modelData
+                  color: root.foreground
+                  opacity: 0.85
+                  font.family: Style.font.family
+                  font.pixelSize: root.fontCaption
+                }
+              }
+            }
+          }
+
           Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: root.hotspotActive ? "Preparing a scannable code" : "QR appears when Omaspot is active"
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.hotspotActive ? "Scan the code with a phone camera to join."
+              : root.status === "starting" ? "Bringing the access point up…"
+              : root.status === "stopping" ? "Shutting the access point down…"
+              : "Turn on to share this network and its QR code."
             color: Commons.Color.muted
+            wrapMode: Text.Wrap
             font.family: Style.font.family
-            font.pixelSize: Style.font.caption
+            font.pixelSize: root.fontCaption
           }
         }
       }
 
-      // Error card: a plain-language headline and next step up front, and the
-      // full diagnostic report one click away for pasting into an agent.
+      // Error banner: what went wrong and what to do, with the full report one
+      // click away when the backend sent one.
       Rectangle {
         id: errorCard
         visible: !root.depsBlocked && root.errorInfo.title !== ""
         width: parent.width
-        height: errorCardInner.implicitHeight + Style.space(20)
+        height: errorInner.implicitHeight + Style.space(24)
         radius: Style.cornerRadius
-        color: Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.12)
-        border.color: Commons.Color.urgent
+        color: Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.10)
+        border.color: Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.40)
         border.width: Math.max(1, Style.space(1))
         // Entrance only: confirms the failure without jumping into place.
         opacity: visible ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
 
-        Row {
-          id: errorCardInner
+        Rectangle {
+          id: errorStripe
           anchors.left: parent.left
-          anchors.right: parent.right
           anchors.top: parent.top
+          anchors.bottom: parent.bottom
           anchors.margins: Style.space(10)
-          spacing: Style.space(10)
+          width: Style.space(3)
+          radius: width / 2
+          color: Commons.Color.urgent
+        }
 
-          Rectangle {
-            id: errorBadge
-            width: Style.space(22)
-            height: width
-            radius: width / 2
-            color: Commons.Color.urgent
+        Column {
+          id: errorInner
+          anchors.left: errorStripe.right
+          anchors.leftMargin: Style.space(12)
+          anchors.right: errorClose.left
+          anchors.rightMargin: Style.space(6)
+          anchors.top: parent.top
+          anchors.topMargin: Style.space(12)
+          spacing: Style.space(4)
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
             Text {
-              anchors.centerIn: parent
-              text: "!"
-              color: Commons.Color.background
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
-            }
-          }
-
-          Column {
-            width: parent.width - errorBadge.width - parent.spacing
-            spacing: Style.space(4)
-
-            Text {
+              id: errorIcon
               textFormat: Text.PlainText
-              width: parent.width
+              text: "\u{f0028}"
+              color: Commons.Color.urgent
+              font.family: Style.font.family
+              font.pixelSize: root.fontBody
+            }
+            Text {
+              width: parent.width - errorIcon.width - parent.spacing
+              textFormat: Text.PlainText
               text: root.errorInfo.title
               color: root.foreground
               wrapMode: Text.Wrap
               font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: root.fontBodySmall
               font.bold: true
             }
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              visible: root.errorInfo.hint !== ""
-              text: root.errorInfo.hint
-              color: Commons.Color.muted
-              wrapMode: Text.Wrap
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-            Row {
-              spacing: Style.space(6)
-              topPadding: Style.space(2)
-              Button {
-                visible: root.errorInfo.hasLog
-                bordered: true
-                text: root.logCopied ? "Copied" : "Copy log"
-                tooltipText: "Copies a full diagnostic report to paste into an agent"
-                fontSize: Style.font.caption
-                onClicked: root.copyErrorLog()
-              }
-              Button {
-                text: "Dismiss"
-                fontSize: Style.font.caption
-                foreground: Commons.Color.muted
-                onClicked: root.dismissError()
-              }
+          }
+          Text {
+            width: parent.width
+            visible: root.errorInfo.hint !== ""
+            textFormat: Text.PlainText
+            text: root.errorInfo.hint
+            color: Commons.Color.muted
+            wrapMode: Text.Wrap
+            font.family: Style.font.family
+            font.pixelSize: root.fontCaption
+          }
+          Item {
+            width: parent.width
+            // Bound to the condition itself: a child of a hidden item always
+            // reads as hidden, so the button cannot decide this for its parent.
+            visible: root.errorReport !== "" && root.errorMessage !== ""
+            height: visible ? copyLogButton.height + Style.space(6) : 0
+            Button {
+              id: copyLogButton
+              anchors.bottom: parent.bottom
+              bordered: true
+              iconText: root.logCopied ? "\u{f012c}" : "\u{f018f}"
+              text: root.logCopied ? "Copied" : "Copy log"
+              tooltipText: "Copies a full diagnostic report to paste into an agent"
+              fontSize: root.fontCaption
+              onClicked: root.copyErrorLog()
             }
           }
+        }
+
+        Button {
+          fontSize: root.fontBody
+          id: errorClose
+          anchors.top: parent.top
+          anchors.right: parent.right
+          anchors.margins: Style.space(6)
+          iconText: "\u{f0156}"
+          tooltipText: "Dismiss"
+          foreground: Commons.Color.muted
+          onClicked: root.clearError()
         }
       }
 
@@ -1067,31 +1241,51 @@ Panel {
       // no implicitHeight, which is what keeps the card the same size as before.
       Column {
         width: parent.width
-        spacing: Style.space(4)
+        spacing: Style.space(6)
         visible: !root.depsBlocked && root.hotspotActive
 
-        Text {
-          text: "Connected devices"
-          color: root.foreground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.subtitle
-          font.bold: true
+        Row {
+          spacing: Style.space(8)
+          PanelSectionHeader {
+            fontSize: root.fontCaption
+            text: "Connected devices"
+            foreground: root.foreground
+          }
+          Rectangle {
+            visible: root.connectedCount > 0
+            anchors.verticalCenter: parent.verticalCenter
+            width: countText.implicitWidth + Style.space(12)
+            height: countText.implicitHeight + Style.space(2)
+            radius: height / 2
+            color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.18)
+            Text {
+              id: countText
+              anchors.centerIn: parent
+              textFormat: Text.PlainText
+              text: String(root.connectedCount)
+              color: Commons.Color.accent
+              font.family: Style.font.family
+              font.pixelSize: root.fontCaption
+              font.bold: true
+            }
+          }
         }
 
         Text {
           width: parent.width
           visible: root.connectedDevices.length === 0
-          text: "Nothing has joined yet"
+          textFormat: Text.PlainText
+          text: "Nothing has joined yet."
           color: Commons.Color.muted
           font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.fontCaption
         }
 
         ListView {
           visible: root.connectedDevices.length > 0
           width: parent.width
-          height: Math.min(contentHeight, Style.space(120))
-          spacing: Style.space(4)
+          height: Math.min(contentHeight, Style.space(132))
+          spacing: Style.space(2)
           clip: true
           boundsBehavior: Flickable.StopAtBounds
           interactive: contentHeight > height
@@ -1102,66 +1296,92 @@ Panel {
 
           model: root.connectedDevices
 
-          delegate: Item {
+          delegate: Rectangle {
             required property var modelData
             width: ListView.view.width
-            height: deviceRowInner.implicitHeight
+            height: deviceRowInner.implicitHeight + Style.space(12)
+            radius: Style.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, modelData.connected ? 0.04 : 0)
 
             Row {
               id: deviceRowInner
-              width: parent.width
-              spacing: Style.space(8)
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(8)
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(10)
 
               Text {
-                width: Style.space(10)
-                text: modelData.connected ? "●" : "○"
-                color: modelData.connected ? root.statusColor : Commons.Color.muted
+                id: deviceIcon
+                textFormat: Text.PlainText
+                text: "\u{f011c}"
+                color: modelData.connected ? Commons.Color.accent : Commons.Color.muted
                 font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.fontBody
+                anchors.verticalCenter: parent.verticalCenter
               }
-              Text {
-                id: deviceName
-                width: Math.max(Style.space(40),
-                  deviceRowInner.width - Style.space(10) - deviceRowInner.spacing
-                  - deviceIp.width - Style.space(8))
-                text: modelData.name
-                color: modelData.connected ? root.foreground : Commons.Color.muted
-                elide: Text.ElideRight
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
+              Column {
+                width: deviceRowInner.width - deviceIcon.width - deviceIp.width - deviceRowInner.spacing * 2
+                anchors.verticalCenter: parent.verticalCenter
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: modelData.name
+                  color: modelData.connected ? root.foreground : Commons.Color.muted
+                  elide: Text.ElideRight
+                  font.family: Style.font.family
+                  font.pixelSize: root.fontBodySmall
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: modelData.connected ? "Connected" : "Recently seen"
+                  color: Commons.Color.muted
+                  font.family: Style.font.family
+                  font.pixelSize: root.fontCaption
+                }
               }
               Text {
                 id: deviceIp
-                text: modelData.ip
-                visible: modelData.ip !== "*"
+                textFormat: Text.PlainText
+                text: modelData.ip !== "*" ? modelData.ip : ""
                 color: Commons.Color.muted
+                anchors.verticalCenter: parent.verticalCenter
                 font.family: Style.font.family
-                font.pixelSize: Style.font.caption
+                font.pixelSize: root.fontCaption
               }
             }
           }
         }
       }
 
-      Text {
+      PanelSeparator {
         visible: !root.depsBlocked
-        text: "Network settings"
-        color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.subtitle
-        font.bold: true
+        foreground: root.foreground
       }
 
-      Text {
-        visible: !root.depsBlocked && !root.settingsEditable
+      // Settings. Locked while the hotspot runs; the note says so up front
+      // instead of leaving the controls to look broken.
+      Item {
+        visible: !root.depsBlocked
         width: parent.width
-        text: root.hotspotActive
-          ? "Stop the hotspot to change network settings"
-          : "Wait for the hotspot operation to finish before changing settings"
-        color: Commons.Color.muted
-        wrapMode: Text.Wrap
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        height: settingsHeader.implicitHeight
+        PanelSectionHeader {
+          fontSize: root.fontCaption
+          id: settingsHeader
+          text: "Network settings"
+          foreground: root.foreground
+        }
+        Text {
+          anchors.right: parent.right
+          anchors.verticalCenter: settingsHeader.verticalCenter
+          visible: !root.settingsEditable
+          textFormat: Text.PlainText
+          text: root.hotspotActive ? "\u{f033e}  Turn off to edit" : "\u{f033e}  Busy"
+          color: Commons.Color.muted
+          font.family: Style.font.family
+          font.pixelSize: root.fontCaption
+        }
       }
 
       Dropdown {
@@ -1169,67 +1389,107 @@ Panel {
         id: upstreamDropdown
         enabled: root.opened && root.settingsEditable
         width: parent.width
-        label: "Upstream interface"
+        label: "Internet source"
         value: root.upstream
         options: root.upstreamOptions
         foreground: root.foreground
         onChanged: root.setUpstream(value)
       }
 
+      // Label column at a fixed width so the two segmented rows line up.
       Row {
         visible: !root.depsBlocked
         width: parent.width
-        spacing: Style.space(6)
+        spacing: Style.space(10)
         Text {
-          text: "Band"
-          color: Commons.Color.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          width: root.settingsLabelWidth
           anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: "Band"
+          color: root.labelColor
+          font.family: Style.font.family
+          font.pixelSize: root.fontCaption
+          font.bold: true
         }
-        Button {
-          text: "2.4 GHz"
-          enabled: root.opened && root.settingsEditable
-          selected: root.band === "2.4"
-          onClicked: root.setBand("2.4")
-        }
-        Button {
-          text: "5 GHz"
-          enabled: root.opened && root.settingsEditable
-          selected: root.band === "5"
-          onClicked: root.setBand("5")
+        Rectangle {
+          width: bandRow.implicitWidth + Style.space(6)
+          height: bandRow.implicitHeight + Style.space(6)
+          radius: Style.cornerRadius
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          border.color: root.hairline
+          border.width: Math.max(1, Style.space(1))
+          Row {
+            id: bandRow
+            anchors.centerIn: parent
+            spacing: Style.space(2)
+            Button {
+              fontSize: root.fontBody
+              text: "2.4 GHz"
+              enabled: root.opened && root.settingsEditable
+              selected: root.band === "2.4"
+              onClicked: root.setBand("2.4")
+            }
+            Button {
+              fontSize: root.fontBody
+              text: "5 GHz"
+              enabled: root.opened && root.settingsEditable
+              selected: root.band === "5"
+              onClicked: root.setBand("5")
+            }
+          }
         }
       }
 
       Row {
         visible: !root.depsBlocked
         width: parent.width
-        spacing: Style.space(6)
+        spacing: Style.space(10)
         Text {
-          text: "Channel"
-          color: Commons.Color.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          width: root.settingsLabelWidth
           anchors.verticalCenter: parent.verticalCenter
+          textFormat: Text.PlainText
+          text: "Channel"
+          color: root.labelColor
+          font.family: Style.font.family
+          font.pixelSize: root.fontCaption
+          font.bold: true
         }
-        Button {
-          text: "Auto"
-          enabled: root.opened && root.settingsEditable
-          selected: root.channelMode === "auto"
-          onClicked: root.setChannelMode("auto")
-        }
-        Button {
-          text: "Manual"
-          enabled: root.opened && root.settingsEditable
-          selected: root.channelMode === "manual"
-          onClicked: root.setChannelMode("manual")
+        Rectangle {
+          anchors.verticalCenter: parent.verticalCenter
+          width: channelModeRow.implicitWidth + Style.space(6)
+          height: channelModeRow.implicitHeight + Style.space(6)
+          radius: Style.cornerRadius
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          border.color: root.hairline
+          border.width: Math.max(1, Style.space(1))
+          Row {
+            id: channelModeRow
+            anchors.centerIn: parent
+            spacing: Style.space(2)
+            Button {
+              fontSize: root.fontBody
+              text: "Auto"
+              enabled: root.opened && root.settingsEditable
+              selected: root.channelMode === "auto"
+              onClicked: root.setChannelMode("auto")
+            }
+            Button {
+              fontSize: root.fontBody
+              text: "Manual"
+              enabled: root.opened && root.settingsEditable
+              selected: root.channelMode === "manual"
+              onClicked: root.setChannelMode("manual")
+            }
+          }
         }
         TextField {
+          font.pixelSize: root.fontBody
           id: channelField
+          anchors.verticalCenter: parent.verticalCenter
           enabled: root.opened && root.settingsEditable
           readOnly: true
           visible: root.channelMode === "manual"
-          width: Style.space(74)
+          width: Style.space(70)
           text: root.channel
           placeholderText: root.band === "5" ? "149" : "1"
           validator: IntValidator { bottom: 1; top: 165 }
@@ -1240,12 +1500,13 @@ Panel {
       Row {
         visible: !root.depsBlocked
         width: parent.width
-        spacing: Style.space(8)
+        spacing: Style.space(10)
         Column {
           width: (parent.width - parent.spacing) / 2
           spacing: Style.space(4)
-          Text { text: "Hotspot name"; color: Commons.Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+          Text { textFormat: Text.PlainText; text: "Hotspot name"; color: root.labelColor; font.family: Style.font.family; font.pixelSize: root.fontCaption; font.bold: true }
           TextField {
+            font.pixelSize: root.fontBody
             id: ssidField
             enabled: root.opened && root.settingsEditable
             readOnly: true
@@ -1258,11 +1519,12 @@ Panel {
         Column {
           width: (parent.width - parent.spacing) / 2
           spacing: Style.space(4)
-          Text { text: "Security key"; color: Commons.Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+          Text { textFormat: Text.PlainText; text: "Security key"; color: root.labelColor; font.family: Style.font.family; font.pixelSize: root.fontCaption; font.bold: true }
           Row {
             width: parent.width
             spacing: Style.space(4)
             TextField {
+              font.pixelSize: root.fontBody
               id: passwordField
               enabled: root.opened && root.settingsEditable
               readOnly: true
@@ -1273,14 +1535,17 @@ Panel {
               Keys.onPressed: function(event) { root.handleFieldKey(passwordField, event) }
             }
             Button {
+              fontSize: root.fontBody
               id: showPassword
-              text: root.passwordVisible ? "Hide" : "Show"
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: root.passwordVisible ? "\u{f0209}" : "\u{f0208}"
+              tooltipText: root.passwordVisible ? "Hide key" : "Show key"
+              foreground: Commons.Color.muted
               onClicked: root.passwordVisible = !root.passwordVisible
             }
           }
         }
       }
-
     }
   }
 }

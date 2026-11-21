@@ -36,9 +36,6 @@ LOG_FILE="$RUN_DIR/create_ap.log"
 # Our own record of the instance we last validated. Private to this user, so it
 # is authoritative in a way the shared /tmp state can never be.
 STATE_FILE="$RUN_DIR/instance"
-# Full diagnostic report for the most recent failure, printed by `lastlog` so
-# the panel's Copy log button can hand it to a person or an agent.
-REPORT_FILE="$RUN_DIR/last-error.log"
 PLUGIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 # "<pid> <starttime>" of the omaspotctl process holding create_ap open. While
 # it is alive, a start is in flight and the log belongs to it.
@@ -508,11 +505,11 @@ interfaces() {
       done
 }
 
-# Errors reach the panel as "title||hint||log": a short plain-language title,
-# an optional next step, and "log" when a full report was saved for `lastlog`.
-# Model.parseError reads the same format; a message without "||" is a title.
+# Errors reach the panel as "title||hint": a short plain-language title and an
+# optional next step. Model.parseError reads the same format; a message
+# without "||" is a bare title.
 fmt_error() {
-  printf '%s||%s||%s' "$1" "${2:-}" "${3:-}"
+  printf '%s||%s' "$1" "${2:-}"
 }
 
 # Turn create_ap's output into something a person can act on. The raw output
@@ -555,51 +552,40 @@ classify_failure() {
   esac
 }
 
-# Writes REPORT_FILE: what happened, the full create_ap output, and enough
-# system state to diagnose it without a back-and-forth. Args: title, hint,
-# context line, and optionally a secret to redact (the passphrase).
-save_error_report() {
+# Prints a diagnostic report to stdout: what happened, the full create_ap
+# output, and enough system state to diagnose it without a back-and-forth.
+# Nothing is written to disk; the panel holds it in memory for its Copy log
+# button until the next error or a shell restart. Args: title, hint, context
+# line, and optionally a secret to redact (the passphrase).
+print_error_report() {
   local title="$1" hint="$2" context="$3" secret="${4:-}" log version
-  secure_run_dir || return 1
   log="$(tr -d '\000' <"$LOG_FILE" 2>/dev/null || true)"
   [ -n "$secret" ] && log="${log//"$secret"/[redacted]}"
   version="$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_DIR/manifest.json" 2>/dev/null | head -n 1)"
-  (
-    umask 077
-    {
-      printf '# Omaspot error report\n\n'
-      printf 'Summary: %s\n' "$title"
-      [ -n "$hint" ] && printf 'Hint: %s\n' "$hint"
-      printf 'When: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-      printf 'Context: %s\n' "$context"
-      printf 'Omaspot: %s\n' "${version:-unknown}"
-      printf 'Kernel: %s\n' "$(uname -r)"
-      printf 'linux-wifi-hotspot: %s\n' "$(pacman -Q linux-wifi-hotspot 2>/dev/null || echo unknown)"
-      printf 'Suspends since boot: %s\n' "$(suspend_count 2>/dev/null || echo unknown)"
-      printf '\n## create_ap output\n```\n%s\n```\n' "${log:-(empty)}"
-      printf '\n## Wireless devices (iw dev)\n```\n%s\n```\n' "$(iw dev 2>&1 || true)"
-      printf '\n## rfkill\n```\n%s\n```\n' "$(rfkill list 2>&1 || true)"
-      printf '\n## Links (ip -br addr)\n```\n%s\n```\n' "$(ip -br addr 2>&1 || true)"
-      printf '\n## NetworkManager devices\n```\n%s\n```\n' "$(nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>&1 || true)"
-      printf '\n## Hotspot processes\n```\n%s\n```\n' "$(pgrep -a 'hostapd|dnsmasq' 2>&1; pgrep -af '/usr/bin/create_ap' 2>&1 | grep -v pgrep)"
-      printf '\n## Recent system log (hotspot, Wi-Fi, suspend)\n```\n%s\n```\n' \
-        "$(timeout 5 journalctl -b --no-pager -o short-iso --since '15 min ago' 2>/dev/null \
-          | grep -iE 'hostapd|dnsmasq|create_ap|iwlwifi|ath|rtw|mt7|brcm|wlp|wlan|ap0|PM: suspend|rfkill' | tail -n 60)"
-    } >"$REPORT_FILE.tmp" && mv -f "$REPORT_FILE.tmp" "$REPORT_FILE"
-  ) 2>/dev/null
-}
-
-lastlog() {
-  if [ -f "$REPORT_FILE" ] && [ ! -L "$REPORT_FILE" ]; then
-    cat -- "$REPORT_FILE"
-  else
-    printf 'Omaspot has not recorded an error yet.\n'
-  fi
+  printf '# Omaspot error report\n\n'
+  printf 'Summary: %s\n' "$title"
+  [ -n "$hint" ] && printf 'Hint: %s\n' "$hint"
+  printf 'When: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+  printf 'Context: %s\n' "$context"
+  printf 'Omaspot: %s\n' "${version:-unknown}"
+  printf 'Kernel: %s\n' "$(uname -r)"
+  printf 'linux-wifi-hotspot: %s\n' "$(pacman -Q linux-wifi-hotspot 2>/dev/null || echo unknown)"
+  printf 'Suspends since boot: %s\n' "$(suspend_count 2>/dev/null || echo unknown)"
+  printf '\n## create_ap output\n```\n%s\n```\n' "${log:-(empty)}"
+  printf '\n## Wireless devices (iw dev)\n```\n%s\n```\n' "$(iw dev 2>&1 || true)"
+  printf '\n## rfkill\n```\n%s\n```\n' "$(rfkill list 2>&1 || true)"
+  printf '\n## Links (ip -br addr)\n```\n%s\n```\n' "$(ip -br addr 2>&1 || true)"
+  printf '\n## NetworkManager devices\n```\n%s\n```\n' "$(nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>&1 || true)"
+  printf '\n## Hotspot processes\n```\n%s\n```\n' "$(pgrep -a 'hostapd|dnsmasq' 2>&1; pgrep -af '/usr/bin/create_ap' 2>&1 | grep -v pgrep)"
+  printf '\n## Recent system log (hotspot, Wi-Fi, suspend)\n```\n%s\n```\n' \
+    "$(timeout 5 journalctl -b --no-pager -o short-iso --since '15 min ago' 2>/dev/null \
+      | grep -iE 'hostapd|dnsmasq|create_ap|iwlwifi|ath|rtw|mt7|brcm|wlp|wlan|ap0|PM: suspend|rfkill' | tail -n 60)"
 }
 
 # Status line: state, interface, pid, upstream, stop reason. The reason is only
 # set on the poll that discovers the hotspot went away, and travels on stdout
 # with the state so the panel never has to pair it up with a separate stderr.
+# On that same poll the lines after the status line are the error report.
 print_inactive() {
   local reason="${1:-}"
   reason="${reason//$'\t'/ }"
@@ -622,8 +608,8 @@ running_record() {
     # Only the poll that actually tears it down carries the reason, so the
     # panel is told once rather than on every poll after a failed stop.
     if reap_dead_instance; then
-      save_error_report "$DEAD_REASON" "$DEAD_HINT" "status: running hotspot on $INST_IFACE (pid $INST_PID) was found dead and stopped"
-      print_inactive "$(fmt_error "$DEAD_REASON" "$DEAD_HINT" log)"
+      print_inactive "$(fmt_error "$DEAD_REASON" "$DEAD_HINT")"
+      print_error_report "$DEAD_REASON" "$DEAD_HINT" "status: running hotspot on $INST_IFACE (pid $INST_PID) was found dead and stopped"
     else
       print_inactive
     fi
@@ -641,10 +627,10 @@ running_record() {
   if [ -r "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
     log_tail="$(tr -d '\000' <"$LOG_FILE" 2>/dev/null || true)"
     classify_failure "$log_tail" "The hotspot stopped unexpectedly"
-    save_error_report "$FAIL_TITLE" "$FAIL_HINT" "status: create_ap exited on its own"
+    print_inactive "$(fmt_error "$FAIL_TITLE" "$FAIL_HINT")"
+    print_error_report "$FAIL_TITLE" "$FAIL_HINT" "status: create_ap exited on its own"
     : > "$LOG_FILE" 2>/dev/null || true
     clear_record
-    print_inactive "$(fmt_error "$FAIL_TITLE" "$FAIL_HINT" log)"
     return 0
   fi
   clear_record
@@ -809,8 +795,9 @@ start_create_ap() {
     printf 'omaspot: %s\n' "$(fmt_error "Permission was denied" "The authorization prompt was cancelled or refused.")" >&2
   else
     classify_failure "$log_text" "The hotspot couldn't start"
-    save_error_report "$FAIL_TITLE" "$FAIL_HINT" "$context" "$password"
-    printf 'omaspot: %s\n' "$(fmt_error "$FAIL_TITLE" "$FAIL_HINT" log)" >&2
+    # The headline goes to stderr; the report to stdout, for Copy log.
+    printf 'omaspot: %s\n' "$(fmt_error "$FAIL_TITLE" "$FAIL_HINT")" >&2
+    print_error_report "$FAIL_TITLE" "$FAIL_HINT" "$context" "$password"
   fi
   # Reported here, so the next status poll must not report it a second time.
   : > "$LOG_FILE" 2>/dev/null || true
@@ -1084,6 +1071,5 @@ case "$command_name" in
   stop) [ "$#" -eq 1 ] || die "stop expects a Wi-Fi interface"; stop_hotspot "$1" ;;
   clients) [ "$#" -eq 0 ] || die "clients expects no arguments"; clients ;;
   qr) qr ;;
-  lastlog) lastlog ;;
   *) die "Unknown command: $command_name" ;;
 esac
