@@ -18,7 +18,8 @@ follows the Omarchy shell's theme.
 - Shares a Wi-Fi connection over Wi-Fi from the same card
 - Plain-language errors with a next step, and **Copy log** for a full
   diagnostic report
-- Notices a hotspot that stopped during suspend instead of showing it as on
+- Notices a hotspot that stopped during suspend instead of showing it as on,
+  and stays quiet when it ends with a shutdown or restart
 
 ## Requirements
 

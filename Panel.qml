@@ -283,7 +283,7 @@ Panel {
     }
     if (status === "inactive" && previous === "active") {
       startPending = false
-      if (result.reason === "" && errorMessage === "" && statusError === "")
+      if (result.reason === "" && !result.shutdown && errorMessage === "" && statusError === "")
         showError("Hotspot stopped")
       saveState()
       qrReady = false
@@ -292,7 +292,7 @@ Panel {
       connectedDevices = []
     }
     if (status === "inactive" && (previous === "stopping" || previous === "starting")) {
-      if (previous === "starting" && result.reason === "" && errorMessage === "" && statusError === "")
+      if (previous === "starting" && result.reason === "" && !result.shutdown && errorMessage === "" && statusError === "")
         showError("The hotspot exited before becoming active")
       saveState()
     }

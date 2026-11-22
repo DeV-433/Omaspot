@@ -49,6 +49,9 @@ REAP_FILE="$RUN_DIR/reaped"
 # Whatever create_ap printed while being torn down is then already accounted
 # for, and must not be reported a second time as an unexpected stop.
 REPORTED_FILE="$RUN_DIR/reported"
+# Boot id of the start that wrote the log. A log from an earlier boot is from a
+# hotspot that ended with the shutdown or restart, not one that failed.
+LOG_BOOT_FILE="$RUN_DIR/log-boot"
 # Successful system suspends since boot. An AP that lost carrier after the
 # count moved did not survive the suspend, so it is dead rather than flapping.
 SUSPEND_STATS=/sys/power/suspend_stats/success
@@ -627,6 +630,38 @@ print_inactive() {
   printf 'inactive\t\t\t\t%s\n' "$reason"
 }
 
+# A hotspot that stops because the system is going down is expected. The extra
+# field tells the panel not to announce the stop at all.
+print_inactive_shutdown() {
+  printf 'inactive\t\t\t\t\tshutdown\n'
+}
+
+boot_id() {
+  read_state_line /proc/sys/kernel/random/boot_id
+}
+
+# True while the system is powering off or rebooting. logind raises
+# PreparingForShutdown as soon as a shutdown is requested; systemd reports
+# "stopping" once units are being torn down. Either is enough.
+system_shutting_down() {
+  [ "$(timeout 2 systemctl is-system-running 2>/dev/null)" = stopping ] && return 0
+  [ "$(timeout 2 busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.login1.Manager PreparingForShutdown 2>/dev/null)" = "b true" ]
+}
+
+log_from_earlier_boot() {
+  local saved
+  saved="$(read_state_line "$LOG_BOOT_FILE")"
+  [ -n "$saved" ] && [ "$saved" != "$(boot_id)" ]
+}
+
+# Forget a hotspot that ended with a shutdown or restart, without reporting it.
+quiet_reset() {
+  rm -f -- "$REPORTED_FILE" "$DOWN_FILE" 2>/dev/null || true
+  : > "$LOG_FILE" 2>/dev/null || true
+  clear_record
+}
+
 running_record() {
   local log_tail
   if discover_instance; then
@@ -650,8 +685,25 @@ running_record() {
     return 0
   fi
 
+  # The hotspot is gone because the laptop is shutting down or restarting.
+  # Only asked when a hotspot was running (its holder or log is still here),
+  # so the polls while the hotspot is simply off stay cheap.
+  if { holder_alive || [ -s "$LOG_FILE" ]; } && system_shutting_down; then
+    holder_alive || quiet_reset
+    print_inactive_shutdown
+    return 0
+  fi
+
   # A start is still in progress: not active yet, but not failed either.
   if holder_alive; then
+    print_inactive
+    return 0
+  fi
+
+  # Left over from before a shutdown or restart: nothing failed.
+  if log_from_earlier_boot; then
+    rm -f -- "$LOG_BOOT_FILE" 2>/dev/null || true
+    quiet_reset
     print_inactive
     return 0
   fi
@@ -768,6 +820,7 @@ start_create_ap() {
   : > "$LOG_FILE"
   chmod 0600 "$LOG_FILE"
   rm -f -- "$REPORTED_FILE" 2>/dev/null || true
+  ( umask 077; boot_id >"$LOG_BOOT_FILE" ) 2>/dev/null || true
   local my_starttime
   my_starttime="$(proc_starttime "$$")" || die "Cannot read own process start time"
   ( umask 077; printf '%s %s\n' "$$" "$my_starttime" >"$HOLDER_FILE" ) || die "Cannot write $HOLDER_FILE"
@@ -835,7 +888,8 @@ start_create_ap() {
   # status alone separates a deliberate shutdown from a real failure.
   # A status poll that found this instance dead and stopped it has already
   # told the panel why, so its exit is not a second failure either.
-  if [ "$rc" -eq 0 ] || [ -f "$REPORTED_FILE" ]; then
+  # Nor is a hotspot ended by the system shutting down.
+  if [ "$rc" -eq 0 ] || [ -f "$REPORTED_FILE" ] || system_shutting_down; then
     rm -f -- "$REPORTED_FILE" 2>/dev/null || true
     : > "$LOG_FILE" 2>/dev/null || true
     return 0

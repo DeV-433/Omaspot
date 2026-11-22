@@ -48,6 +48,8 @@ function parseStatus(raw) {
     liveBand: /^[0-9]+$/.test(fields[6] || "") ? (Number(fields[6]) < 3000 ? "2.4" : "5") : "",
     // Why the hotspot went away; only present on the poll that noticed it.
     reason: String(fields[4] || "").replace(/^omaspot:\s*/i, "").trim(),
+    // The hotspot ended because the system is shutting down: say nothing.
+    shutdown: fields[0] !== "active" && fields[5] === "shutdown",
     // On that same poll, the diagnostic report follows the status line.
     report: lines.slice(1).join("\n").trim()
   }
