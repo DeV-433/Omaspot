@@ -41,7 +41,6 @@ function parseStatus(raw) {
   return {
     state: fields[0] === "active" ? "active" : "inactive",
     hotspotInterface: fields[1] || "",
-    upstream: fields[3] || "",
     // The running AP's real channel and frequency, which can differ from the
     // saved band when it follows the Wi-Fi network it shares.
     liveChannel: /^[0-9]+$/.test(fields[5] || "") ? fields[5] : "",
@@ -95,12 +94,12 @@ function parseAsciiQr(raw) {
   // the quiet zone. Do not trim lines: leading/trailing spaces are data.
   var lines = String(raw || "").replace(/\r/g, "").split("\n")
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
-  if (lines.length === 0) return { rows: [], size: 0 }
+  if (lines.length === 0) return { rows: [], runs: [], size: 0 }
 
   var maxWidth = 0
   for (var i = 0; i < lines.length; i++) maxWidth = Math.max(maxWidth, lines[i].length)
   if (maxWidth < 21 || maxWidth % 2 !== 0 || lines.length !== maxWidth / 2)
-    return { rows: [], size: 0 }
+    return { rows: [], runs: [], size: 0 }
 
   var rows = []
   for (var r = 0; r < lines.length; r++) {
@@ -111,7 +110,26 @@ function parseAsciiQr(raw) {
       row += (line.charAt(c) === "#" || line.charAt(c + 1) === "#") ? "1" : "0"
     rows.push(row)
   }
-  return { rows: rows, size: rows.length }
+  return { rows: rows, runs: qrRuns(rows), size: rows.length }
+}
+
+// Each row's horizontal runs of dark modules as { x, y, w } in modules, so the
+// panel draws one rectangle per run instead of one per module (a 37-module
+// code is 1369 modules but only a few hundred runs). Runs never cross a module
+// edge, so the drawn code is identical.
+function qrRuns(rows) {
+  var runs = []
+  for (var y = 0; y < rows.length; y++) {
+    var row = rows[y]
+    var x = 0
+    while (x < row.length) {
+      if (row.charAt(x) !== "1") { x++; continue }
+      var start = x
+      while (x < row.length && row.charAt(x) === "1") x++
+      runs.push({ x: start, y: y, w: x - start })
+    }
+  }
+  return runs
 }
 
 function parseClients(raw) {
@@ -214,6 +232,7 @@ if (typeof module !== "undefined") {
     parseClients: parseClients,
     parseDoctor: parseDoctor,
     parseAsciiQr: parseAsciiQr,
+    qrRuns: qrRuns,
     validChannelForBand: validChannelForBand,
     validate: validate,
     replaceTextRange: replaceTextRange

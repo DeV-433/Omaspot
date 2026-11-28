@@ -62,8 +62,9 @@ Panel {
     bandLabel,
     hotspotActive && liveChannel !== "" ? "Channel " + liveChannel
       : channelMode === "manual" ? "Channel " + channel : "Auto channel",
-    hotspotActive && hotspotInterface !== "" ? "via " + hotspotInterface
-      : upstream === "auto" ? "Auto source" : "via " + upstream
+    // The internet source, on or off: hotspotInterface is the Wi-Fi adapter
+    // hosting the hotspot, which would read as the connection being shared.
+    upstream === "auto" ? "Auto source" : "via " + upstream
   ]
   readonly property real settingsLabelWidth: Style.space(64)
   // The flyout's type runs one step above the kit defaults; the headline a
@@ -78,6 +79,9 @@ Panel {
   // that does not compete with the theme's (often bright) popup border.
   readonly property color labelColor: Qt.darker(foreground, 1.4)
   readonly property color hairline: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.12)
+  // The kit's controls look the same enabled or not, so settings that are
+  // locked while the hotspot runs are dimmed to read as locked.
+  readonly property real settingsOpacity: settingsEditable ? 1 : 0.5
   property string ssid: "Omaspot"
   property string password: "omaspot123"
   property string band: "2.4"
@@ -87,7 +91,8 @@ Panel {
   property var upstreamOptions: [{ value: "auto", label: "Auto-detect" }]
   property bool settingsLoaded: false
   property bool qrReady: false
-  property var qrRows: []
+  // Dark runs of the QR code, from Model.qrRuns.
+  property var qrRuns: []
   property int qrSize: 0
   property bool passwordVisible: false
   property bool startPending: false
@@ -117,9 +122,6 @@ Panel {
   // The flyout sits on the popup surface, not the bar. The bar's text color can
   // be dark (a transparent bar over a light wallpaper), which vanishes here.
   readonly property color foreground: Commons.Color.popups.text
-  readonly property color statusColor: status === "active" ? Commons.Color.accent
-    : (status === "starting" || status === "stopping") ? Commons.Color.accent
-    : statusError !== "" || errorMessage !== "" ? Commons.Color.urgent : Commons.Color.muted
 
   function open() {
     root.controller.show()
@@ -274,7 +276,6 @@ Panel {
     hotspotInterface = result.hotspotInterface
     liveBand = result.liveBand
     liveChannel = result.liveChannel
-    if (result.upstream !== "" && upstream === "auto") upstream = result.upstream
     if (previous !== status && status === "active") {
       startPending = false
       saveState()
@@ -282,14 +283,12 @@ Panel {
       refreshClients()
     }
     if (status === "inactive" && previous === "active") {
-      startPending = false
       if (result.reason === "" && !result.shutdown && errorMessage === "" && statusError === "")
         showError("Hotspot stopped")
       saveState()
       qrReady = false
-      qrRows = []
+      qrRuns = []
       qrSize = 0
-      connectedDevices = []
     }
     if (status === "inactive" && (previous === "stopping" || previous === "starting")) {
       if (previous === "starting" && result.reason === "" && !result.shutdown && errorMessage === "" && statusError === "")
@@ -325,7 +324,6 @@ Panel {
       showError(errors.join(" · "))
       return
     }
-    var selectedUpstream = upstream === "auto" ? "auto" : upstream
     clearError()
     startReport = ""
     startStderr = ""
@@ -335,7 +333,7 @@ Panel {
     status = "starting"
     startPending = true
     saveState()
-    startProc.command = [backendPath, "start", hotspotInterfaceForStart(), selectedUpstream, band, channelMode, channel]
+    startProc.command = [backendPath, "start", hotspotInterfaceForStart(), upstream, band, channelMode, channel]
     startProc.running = true
   }
 
@@ -368,14 +366,14 @@ Panel {
   function generateQr() {
     if (!hotspotActive || qrProc.running) return
     qrReady = false
-    qrRows = []
+    qrRuns = []
     qrSize = 0
     qrProc.running = true
   }
 
   function applyQr(raw) {
     var result = Model.parseAsciiQr(raw)
-    qrRows = result.rows
+    qrRuns = result.runs
     qrSize = result.size
     qrReady = qrSize > 0
     if (!qrReady) showError("Could not render the hotspot QR code")
@@ -739,7 +737,6 @@ Panel {
   }
   // Only polls while the hotspot is up; the backend exits immediately otherwise.
   Timer {
-    id: clientsTimer
     interval: 5000
     repeat: true
     running: root.hotspotActive
@@ -797,7 +794,6 @@ Panel {
       // the shape of the kit's PanelHero so the two text lines can share one
       // exact left edge and take the flyout's larger type.
       Item {
-        id: header
         width: parent.width
         height: Math.max(headerIcon.height, headerLabels.implicitHeight, toggleControl.implicitHeight)
 
@@ -1003,7 +999,6 @@ Panel {
       // Hotspot card: the QR tile beside the network it joins. While the
       // hotspot is off the tile is a quiet placeholder rather than a fake code.
       Rectangle {
-        id: hotspotCard
         visible: !root.depsBlocked
         width: parent.width
         height: Math.max(qrTile.height, cardInfo.implicitHeight) + Style.space(24)
@@ -1039,19 +1034,15 @@ Panel {
             opacity: visible ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: Style.duration(180); easing.type: Easing.OutCubic } }
 
-            Grid {
-              anchors.centerIn: parent
-              columns: root.qrSize
-              Repeater {
-                model: root.qrSize * root.qrSize
-                Rectangle {
-                  required property int index
-                  readonly property int row: Math.floor(index / root.qrSize)
-                  readonly property int column: index % root.qrSize
-                  width: qrCanvas.moduleSize
-                  height: qrCanvas.moduleSize
-                  color: root.qrRows[row] && root.qrRows[row].charAt(column) === "1" ? "#111111" : "transparent"
-                }
+            Repeater {
+              model: root.qrRuns
+              Rectangle {
+                required property var modelData
+                x: modelData.x * qrCanvas.moduleSize
+                y: modelData.y * qrCanvas.moduleSize
+                width: modelData.w * qrCanvas.moduleSize
+                height: qrCanvas.moduleSize
+                color: "#111111"
               }
             }
           }
@@ -1152,7 +1143,6 @@ Panel {
       // Error banner: what went wrong and what to do, with the full report one
       // click away when the backend sent one.
       Rectangle {
-        id: errorCard
         visible: !root.depsBlocked && root.errorInfo.title !== ""
         width: parent.width
         height: errorInner.implicitHeight + Style.space(24)
@@ -1400,6 +1390,7 @@ Panel {
 
       Dropdown {
         visible: !root.depsBlocked
+        opacity: root.settingsOpacity
         id: upstreamDropdown
         enabled: root.opened && root.settingsEditable
         width: parent.width
@@ -1413,6 +1404,7 @@ Panel {
       // Label column at a fixed width so the two segmented rows line up.
       Row {
         visible: !root.depsBlocked
+        opacity: root.settingsOpacity
         width: parent.width
         spacing: Style.space(10)
         Text {
@@ -1456,6 +1448,7 @@ Panel {
 
       Row {
         visible: !root.depsBlocked
+        opacity: root.settingsOpacity
         width: parent.width
         spacing: Style.space(10)
         Text {
@@ -1513,6 +1506,7 @@ Panel {
 
       Row {
         visible: !root.depsBlocked
+        opacity: root.settingsOpacity
         width: parent.width
         spacing: Style.space(10)
         Column {

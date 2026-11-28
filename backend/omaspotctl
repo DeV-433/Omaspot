@@ -1027,6 +1027,8 @@ stop_hotspot() {
   fi
 
   pid="$INST_PID"
+  # discover_instance clears INST_* once the instance is gone; keep this.
+  local starttime="$INST_STARTTIME"
 
   # Everything below re-checks the pid immediately before the privileged call.
   # It was read from a file, and between discovery and signalling the process can
@@ -1061,6 +1063,17 @@ stop_hotspot() {
     waited=$((waited + 1))
   done
   discover_instance && die "Hotspot did not stop"
+  # The instance looks gone as soon as hostapd dies, but create_ap keeps
+  # writing its cleanup output to the log until it exits. With no holder left
+  # to collect it (the shell reloaded while the hotspot ran), emptying the log
+  # before then leaves those lines behind, and the next status poll reports
+  # them as an unexpected stop. So wait for create_ap itself, up to 10s more.
+  waited=0
+  while [ "$waited" -lt 40 ] && pid_is_create_ap "$pid" &&
+    [ "$(proc_starttime "$pid" 2>/dev/null)" = "$starttime" ]; do
+    sleep 0.25
+    waited=$((waited + 1))
+  done
   clear_record
   : > "$LOG_FILE" 2>/dev/null || true
 }
@@ -1183,19 +1196,6 @@ qr() {
   printf '%s' "$payload" | qrencode -t ASCII -o -
 }
 
-deps() {
-  local item found=1
-  for item in create_ap dnsmasq iptables nmcli qrencode pkexec; do
-    if command -v "$item" >/dev/null 2>&1; then
-      printf 'ok\t%s\n' "$item"
-    else
-      printf 'missing\t%s\n' "$item"
-      found=0
-    fi
-  done
-  [ "$found" -eq 1 ]
-}
-
 # The packages a standard Omarchy installation may lack. linux-wifi-hotspot
 # lists dnsmasq and iptables only as optional, but Omaspot always shares with
 # NAT, which needs both: without dnsmasq create_ap fails halfway through start.
@@ -1241,7 +1241,6 @@ shift || true
 case "$command_name" in
   interfaces) interfaces ;;
   status) status ;;
-  deps) deps ;;
   doctor) [ "$#" -eq 0 ] || die "doctor expects no arguments"; doctor ;;
   start) [ "$#" -eq 5 ] || die "start expects wifi, upstream, band, channel mode, channel"; start_create_ap "$@" ;;
   stop) [ "$#" -eq 1 ] || die "stop expects a Wi-Fi interface"; stop_hotspot "$1" ;;

@@ -11,15 +11,13 @@ follows the Omarchy shell's theme.
 - One-click hotspot toggle from the bar
 - A bar icon that shows off, starting and broadcasting at a glance, with a
   bead for each connected device
-- QR code to join, shown while the hotspot is on
-- List of connected devices
+- QR code to join and a list of connected devices while the hotspot is on
 - Auto-detected Wi-Fi card and internet source
 - 2.4 GHz or 5 GHz, with automatic or manual channel
 - Shares a Wi-Fi connection over Wi-Fi from the same card
 - Plain-language errors with a next step, and **Copy log** for a full
   diagnostic report
-- Notices a hotspot that stopped during suspend instead of showing it as on,
-  and stays quiet when it ends with a shutdown or restart
+- Recovers on its own from suspend, shutdown and logging out
 
 ## Requirements
 
@@ -31,8 +29,8 @@ Omaspot needs
 yay -S --needed linux-wifi-hotspot dnsmasq iptables
 ```
 
-If any are missing, the panel shows the install command instead of the
-hotspot controls. Reopen the panel after installing; no restart is needed.
+If any are missing, the panel shows the install command in place of the
+hotspot controls. Select **Re-check** after installing; no restart is needed.
 
 ## Install
 
@@ -51,9 +49,8 @@ code before installing it from a source you don't trust.
 
 ## Use
 
-Click the bar icon to open the panel. Pick the internet source, band and
-channel if needed, set the hotspot name and security key, then flip the
-switch.
+Click the bar icon to open the panel, adjust the settings if needed, then flip
+the switch. Settings are locked while the hotspot is on.
 
 A fresh install starts with the name `Omaspot` and the key `omaspot123`.
 **Change the key before sharing the network.** Settings are saved per user in
@@ -62,23 +59,24 @@ plugin folder.
 
 ### Sharing Wi-Fi over Wi-Fi
 
-Most Wi-Fi cards can only run a hotspot on the same channel as the network
-they're connected to. With the channel on **Auto**, Omaspot follows that
-network's band and channel, and the panel shows the ones actually in use.
-A manual channel only works if it matches the connected network.
+Most Wi-Fi cards can only host a hotspot on the channel of the network they're
+connected to. On **Auto**, Omaspot follows that network's band and channel and
+shows the ones in use. A manual channel only works if it matches.
 
-### When something goes wrong
+## Troubleshooting
+
+### Errors and Copy log
 
 The panel says what failed and what to try next. For failures reported by
-`create_ap`, **Copy log** puts a full diagnostic report on the clipboard,
-with the security key removed, ready to paste into an issue. The report is
-kept in memory only.
+`create_ap`, **Copy log** puts a full diagnostic report on the clipboard, with
+the security key removed, ready to paste into an issue. The report is kept in
+memory only.
 
 ### Password prompt after logging out
 
 Logging out while the hotspot is on kills `create_ap` before it can clean up,
-leaving its `ap0` interface holding the Wi-Fi card until the next restart.
-The next start removes it, and that needs your password: Omaspot can run only
+leaving its `ap0` interface holding the Wi-Fi card until the next restart. The
+next start removes it, and that needs your password: Omaspot can run only
 `create_ap` as root without asking, and `create_ap` can't remove an interface
 it didn't create. The prompt says why it's asking and appears only in this
 case, never after a restart or a normal stop.
