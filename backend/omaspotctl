@@ -400,6 +400,66 @@ orphaned_pids() {
   done
 }
 
+# AP interfaces (ap0, ap1, ...) on the same radio as $1 that nothing is using.
+# A create_ap killed before its cleanup ran -- most often by logging out, which
+# ends the session scope pkexec started it in -- leaves its interface behind in
+# the kernel, still in AP mode. The next start then creates ap1 next to it and
+# the radio refuses with "Device or resource busy". A reboot clears it because
+# the interface only exists in the running kernel.
+# Listed only when no create_ap or hostapd is running at all, so an interface
+# some live hotspot (ours or anyone else's) depends on is never touched.
+stale_ap_ifaces() {
+  local wifi="$1" phy dir name link p comm
+  command -v iw >/dev/null 2>&1 || return 0
+  link="$(readlink "/sys/class/net/$wifi/phy80211" 2>/dev/null)" || return 0
+  phy="${link##*/}"
+  [ -n "$phy" ] || return 0
+  for p in /proc/[0-9]*; do
+    comm=""
+    read -r comm <"$p/comm" 2>/dev/null || continue
+    [ "$comm" = hostapd ] && return 0
+    [ "$comm" = bash ] && pid_is_create_ap "${p#/proc/}" && return 0
+  done
+  for dir in /sys/class/net/ap[0-9]*; do
+    [ -e "$dir" ] || continue
+    name="${dir##*/}"
+    [[ $name =~ ^ap[0-9]{1,3}$ ]] || continue
+    [ "$name" != "$wifi" ] || continue
+    link="$(readlink "$dir/phy80211" 2>/dev/null)" || continue
+    [ "${link##*/}" = "$phy" ] || continue
+    iw dev "$name" info 2>/dev/null | grep -q 'type[[:space:]]*AP' || continue
+    printf '%s\n' "$name"
+  done
+}
+
+# Delete the stale AP interfaces on $1's radio. This is the one privileged step
+# outside create_ap, so it goes through polkit's ordinary admin prompt; the
+# name it receives is a validated apN.
+clear_stale_ap_ifaces() {
+  local wifi="$1" name rc
+  local -a stale=() cmd=()
+  mapfile -t stale < <(stale_ap_ifaces "$wifi")
+  [ "${#stale[@]}" -gt 0 ] || return 0
+  for name in "${stale[@]}"; do
+    cmd=(/usr/bin/iw dev "$name" del)
+    # Omarchy's polkit prompt shows this reason in place of its generic
+    # heading, for the next prompt that runs exactly this command line.
+    # Elsewhere the prompt just keeps its default text.
+    if command -v omarchy-shell >/dev/null 2>&1; then
+      timeout 2 omarchy-shell -q omarchy.polkit expect "${cmd[*]}" \
+        "Omaspot: remove a leftover hotspot to start a new one" >/dev/null 2>&1 || true
+    fi
+    pkexec --user root "${cmd[@]}" >/dev/null 2>&1
+    rc=$?
+    if [ -e "/sys/class/net/$name" ]; then
+      if [ "$rc" -eq 126 ]; then
+        die "$(fmt_error "An old hotspot interface is blocking the Wi-Fi card" "Omaspot needs your password to remove $name, left over from a hotspot that didn't shut down cleanly. Try again, or run: sudo iw dev $name del")"
+      fi
+      die "$(fmt_error "An old hotspot interface is blocking the Wi-Fi card" "$name was left over from a hotspot that didn't shut down cleanly. Remove it with: sudo iw dev $name del")"
+    fi
+  done
+}
+
 suspend_count() {
   local n
   n="$(read_state_line "$SUSPEND_STATS")"
@@ -553,6 +613,9 @@ classify_failure() {
     *"Address already in use"*)
       FAIL_TITLE="Another service is using the hotspot's network address"
       FAIL_HINT="An earlier hotspot may still be running in the background. Copy the log for details." ;;
+    *"Device or resource busy"*"does not fully support virtual interfaces"*)
+      FAIL_TITLE="The Wi-Fi card is still held by an old hotspot"
+      FAIL_HINT="An earlier hotspot didn't shut down cleanly. Run 'iw dev' and remove any leftover apN with: sudo iw dev apN del" ;;
     *"does not support AP (master) mode"*)
       FAIL_TITLE="This Wi-Fi card can't host a hotspot"
       FAIL_HINT="Its driver does not support access point mode." ;;
@@ -817,6 +880,7 @@ start_create_ap() {
   local hw=0
   while holder_alive && [ "$hw" -lt 20 ]; do sleep 0.25; hw=$((hw + 1)); done
   holder_alive && die "A hotspot start is already in progress"
+  clear_stale_ap_ifaces "$wifi"
   : > "$LOG_FILE"
   chmod 0600 "$LOG_FILE"
   rm -f -- "$REPORTED_FILE" 2>/dev/null || true

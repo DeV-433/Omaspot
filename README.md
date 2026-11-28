@@ -74,6 +74,15 @@ The panel says what failed and what to try next. For failures reported by
 with the security key removed, ready to paste into an issue. The report is
 kept in memory only.
 
+### Password prompt after logging out
+
+Logging out while the hotspot is on kills `create_ap` before it can clean up,
+leaving its `ap0` interface holding the Wi-Fi card until the next restart.
+The next start removes it, and that needs your password: Omaspot can run only
+`create_ap` as root without asking, and `create_ap` can't remove an interface
+it didn't create. The prompt says why it's asking and appears only in this
+case, never after a restart or a normal stop.
+
 ## Security note
 
 `create_ap` keeps shared state in `/tmp/create_ap.common.conf`. If that folder
